@@ -1,0 +1,22 @@
+# 沙箱执行配置（解析约定见 backend/app/sandbox.py 与 backend/app/config.py）
+# mode 决定执行路由：
+#   sandbox  ：docker run --rm 临时容器执行（默认、推荐，隔离性强）
+#   local    ：在宿主 local.workdir 下直接执行，需 local.allow=true 才放行（安全默认关闭）
+mode: sandbox
+
+docker:
+  image: python:3.12-slim   # 执行容器镜像
+  workdir: /workspace       # 容器内工作目录
+  timeout: 30               # 单次执行超时（秒）
+  network: bridge           # docker 网络；网络不可用时改为 none 以增强隔离（则无法联网）
+  mount: ""                 # 可选卷挂载，格式 "host_path:container_path"，如 "/host/data:/workspace/data"
+  read_only: true           # 容器根文件系统只读，禁止容器内写入（安全限制）
+  mem_limit: 512m           # 内存上限（docker --memory）
+  cpu_quota: 50000          # CPU 配额，除以 100000 得核心数（如 50000 = 0.5 核）
+  env:                      # 注入容器的环境变量，格式 name: value
+    PYTHONUNBUFFERED: "1"
+
+local:
+  allow: false              # 是否允许本地执行（安全：默认关闭，置 true 时才放行）
+  workdir: /opt/aiassistant/sandbox  # 本地执行的工作目录
+  timeout: 30               # 单次执行超时（秒）

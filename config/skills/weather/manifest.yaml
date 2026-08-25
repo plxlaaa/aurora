@@ -1,0 +1,16 @@
+# weather skill 的 manifest（解析约定见 backend/app/skills.py）
+# 参数列表会转换为大模型的 function calling 定义；required 参数必将被注入。
+name: weather
+description: 查询指定城市的实时天气与预报
+triggers:
+  - "天气"
+  - "weather"
+  - "气温"
+parameters:
+  - name: city
+    type: string
+    required: true
+    description: 城市名称（中文）
+entry: run.py                 # 执行入口脚本相对本目录
+timeout: 15                   # 执行超时（秒）
+enabled: true                 # 是否启用该 skill（false 则不注入模型）

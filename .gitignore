@@ -1,0 +1,18 @@
+# Node
+node_modules/
+frontend/dist/
+*.local
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Runtime data
+data/
+*.log
+logs/
+
+# OS
+.DS_Store

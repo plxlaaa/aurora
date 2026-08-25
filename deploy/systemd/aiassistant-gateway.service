@@ -1,0 +1,46 @@
+# =============================================================================
+# aiassistant-gateway.service —— AI 智能助手网关 (FastAPI) 服务
+#
+# 说明：
+#   - 以 aiassistant 用户运行，禁止 root 以免泄露权限
+#   - 网关只监听 127.0.0.1:8080，所有外部流量统一由 nginx 反向代理进入
+#   - 通过 Environment 注入网关运行所需的路径配置，应用代码从环境变量读取
+#     （对应 backend/app/config.py 中的读法）
+#   - ExecStart 使用 backend 目录下的虚拟环境 uvicorn 启动应用主入口 app.main:app
+#   - 若网关崩溃/被杀，systemd 会在 5 秒后自动拉起（Restart=on-failure）
+# =============================================================================
+[Unit]
+Description=AI Assistant Gateway (FastAPI, single node 单机网关)
+# 依赖网络就绪后再启动
+After=network.target
+# 强烈建议等 vLLM 推理服务先起来；若网关启动时后端未就绪也能重试，故设弱依赖
+Wants=vllm-main.service
+
+[Service]
+Type=simple
+# 以非特权用户运行，避免以 root 运行泄露风险
+User=aiassistant
+Group=aiassistant
+WorkingDirectory=/opt/aiassistant/backend
+
+Environment=PATH=/opt/aiassistant/backend/venv/bin
+# ---- 网关运行路径配置（随项目结构，如需调整请同步修改 install.sh）----
+Environment=AI_ASSISTANT_CONFIG_DIR=/opt/aiassistant/config
+Environment=AI_ASSISTANT_DATA_DIR=/opt/aiassistant/data/sessions
+Environment=AI_ASSISTANT_SKILLS_DIR=/opt/aiassistant/config/skills
+Environment=AI_ASSISTANT_UPLOAD_DIR=/opt/aiassistant/data/uploads
+# 若前后端同机且走 nginx，可在此显式声明前端静态目录（可选）
+# Environment=AI_ASSISTANT_FRONTEND_DIR=/opt/aiassistant/frontend/dist
+
+# 启动 FastAPI 网关（uvicorn 应用入口固定为 app.main:app）
+ExecStart=/opt/aiassistant/backend/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8080
+
+# 异常退出时自动重启，间隔 5 秒；正常 stop（systemctl stop）不会被拉起
+Restart=on-failure
+RestartSec=5
+
+# 基础资源保护（可选，可按需调整）
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,43 @@
+# =============================================================================
+# vllm-main.service —— vLLM 主对话模型服务（OpenAI 兼容端点）
+#
+# 说明：
+#   - vLLM 提供 OpenAI 兼容的 /v1 接口，网关通过 base_url 指向本服务
+#   - 本文为“占位示例”：ExecStart 里的 --model 模型名、--port 端口、
+#     --served-model-name 对外别名，可按实际部署机型/卡显存自由替换
+#   - 单机多卡/多模型时，main / vision / compress 三个服务分别用不同端口
+#     与不同 GPU（--tensor-parallel-size 或 CUDA_VISIBLE_DEVICES 区分）
+#   - 网关通过 config/models.yaml 中登记的 endpoint 自动发现各 vLLM 服务
+# =============================================================================
+[Unit]
+Description=vLLM Main Model (OpenAI-compatible, main 主对话模型)
+After=network.target
+
+[Service]
+Type=simple
+User=aiassistant
+Group=aiassistant
+WorkingDirectory=/opt/aiassistant
+
+# ---- 可选的环境变量说明（按需取消注释修改）----
+# 指定加载到哪一块 GPU（0,1 / 1 等），用于多卡分配
+# Environment=CUDA_VISIBLE_DEVICES=0
+# 若想显式给 vLLM 传参，可通过 VLLM_* 环境变量（被 vllm serve 读取）：
+# 例如：
+# Environment=VLLM_SKIP_WARMUP=false
+# Environment=VLLM_ALLOW_DUPLICATE_MODELS=false
+# 更常见做法是直接把参数写进下方 ExecStart 即可。
+
+# 占位示例：主对话模型，监听 8001 端口
+# 请按实际需要替换 --model（模型 HF 路径或名称）、--port、--served-model-name
+ExecStart=vllm serve Qwen/Qwen2.5-7B-Instruct --port 8001 --served-model-name main --host 127.0.0.1 --max-model-len 8192
+
+Restart=on-failure
+RestartSec=5
+
+# 卸载后清理（vLLM 会注册 NUMA/MPS，建议）
+ExecStopPost=-/usr/bin/rm -f /dev/shm/vllm_*
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

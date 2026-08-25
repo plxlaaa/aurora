@@ -1,0 +1,21 @@
+# web_fetch skill 的 manifest（解析约定见 backend/app/skills.py）
+# 参数列表会转换为大模型的 function calling 定义；required 参数必将被注入。
+name: web_fetch
+description: 抓取指定 URL 的网页内容，返回标题与正文文本
+triggers:
+  - "网页"
+  - "抓取"
+  - "fetch"
+  - "read url"
+parameters:
+  - name: url
+    type: string
+    required: true
+    description: 待抓取的网页完整 URL（含 http/https）
+  - name: max_chars
+    type: integer
+    required: false
+    description: 返回正文的最大字符数（可选，默认 4000）
+entry: run.py                 # 执行入口脚本相对本目录
+timeout: 20                   # 执行超时（秒）
+enabled: true                 # 是否启用该 skill（false 则不注入模型）

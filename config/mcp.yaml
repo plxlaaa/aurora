@@ -1,0 +1,12 @@
+# MCP server 配置（格式：{servers: [...]}）
+# 解析约定见 backend/app/config.py：Settings.mcp_servers() 返回 servers 列表。
+# 启用连接前请将对应项的 enabled 改为 true。
+servers:
+  - name: example-stdio
+    description: "示例 stdio server 占位，默认不连接。启用时把 enabled 改为 true 并配置真实的 command/args。"
+    transport: stdio        # 传输方式：stdio | sse | http
+    command: npx            # 启动命令
+    args:                   # 命令参数列表
+      - "-y"
+      - "@modelcontextprotocol/server-example"
+    enabled: false
