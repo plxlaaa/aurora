@@ -48,6 +48,19 @@ def require_auth(authorization: Annotated[str | None, Header()] = None) -> None:
         raise HTTPException(status_code=401, detail="未授权")
 
 
+def _merge_dict(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    """递归合并：patch 中为 None 的字段忽略，嵌套 dict 逐层合并，其余字段覆盖。"""
+    merged = dict(base)
+    for key, value in patch.items():
+        if value is None:
+            continue
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 # ---------- REST 端点 ----------
 @router.get("/api/health")
 async def health() -> dict[str, Any]:
@@ -69,12 +82,13 @@ async def update_models(
     payload: dict[str, Any], _: Annotated[None, Depends(require_auth)]
 ) -> dict[str, Any]:
     current = settings.raw("models")
+    # 字段级合并：仅覆盖请求中显式提供的字段，未提供的（如 api_key）保留原值
     if "endpoints" in payload:
-        current["endpoints"] = payload["endpoints"]
+        current["endpoints"] = _merge_dict(current.get("endpoints", {}), payload["endpoints"])
     if "vision_routing" in payload:
-        current["vision_routing"] = payload["vision_routing"]
+        current["vision_routing"] = _merge_dict(current.get("vision_routing", {}), payload["vision_routing"])
     if "compress" in payload:
-        current["compress"] = payload["compress"]
+        current["compress"] = _merge_dict(current.get("compress", {}), payload["compress"])
     settings.update("models", current)
     registry.reload()
     await registry.probe_all()

@@ -1,14 +1,12 @@
 <template>
   <div class="chat-view">
+    <div v-if="notice.text" class="notice" :class="notice.type">{{ notice.text }}</div>
     <!-- 会话侧栏 -->
     <aside class="sidebar">
-      <button class="primary new-btn" @click="createSession">＋ 新建会话</button>
+      <button class="primary new-btn" @click="createNewSession">＋ 新建会话</button>
 
       <div class="conn-status">
-        <span
-          class="dot"
-          :class="{ connected: wsState === 'connected' }"
-        ></span>
+        <span class="dot" :class="{ connected: wsState === 'connected' }"></span>
         <span class="label">{{ wsText }}</span>
       </div>
 
@@ -18,105 +16,81 @@
           :key="s.id"
           class="session-item"
           :class="{ active: s.id === currentSessionId }"
-          @click="switchSession(s)"
+          @click="switchSession(s.id)"
         >
           <span class="s-name">{{ s.title || '未命名会话' }}</span>
-          <button class="del" title="删除会话" @click.stop="removeSession(s.id)">
+          <span v-if="s.status === 'running'" class="s-status" title="处理中">◔</span>
+          <button
+            class="s-action"
+            title="归档会话"
+            @click.stop="archive(s.id)"
+          >
+            📦
+          </button>
+          <button class="s-action danger" title="删除会话" @click.stop="remove(s.id)">
             ✕
           </button>
         </li>
       </ul>
 
-      <button class="compress-btn" :disabled="!currentSessionId" @click="compressNow">
+      <button
+        class="compress-btn"
+        :disabled="!currentSessionId || streaming"
+        @click="compressNow"
+      >
         ⤷ 压缩上下文
       </button>
     </aside>
 
     <!-- 主对话区 -->
     <section class="main">
+      <!-- 工具栏：模型 / 思考强度 / 连接 -->
+      <div class="chat-toolbar">
+        <label class="tool-item">
+          <span>模型</span>
+          <select v-model="currentModel" :disabled="!currentModelOptions.length" @change="onSwitchModel">
+            <option v-for="opt in currentModelOptions" :key="opt" :value="opt">
+              {{ opt }}
+            </option>
+          </select>
+        </label>
+        <label class="tool-item">
+          <span>思考强度</span>
+          <select v-model="thinkingLevel" @change="onSetThinking">
+            <option value="low">低</option>
+            <option value="normal">中</option>
+            <option value="high">高</option>
+          </select>
+        </label>
+        <div class="toolbar-spacer"></div>
+        <span class="conn-state" :class="wsState">
+          {{ wsState === 'connected' ? '●' : wsState === 'connecting' ? '◔' : '○' }}
+          {{ wsText }}
+        </span>
+      </div>
+
+      <!-- 消息流 -->
       <div ref="scroller" class="messages">
         <div v-if="!messages.length" class="empty">
-          在下方输入内容开始对话，可附带图片。
+          <p>在下方输入内容开始对话，可附带图片。</p>
+          <p class="hint">支持视觉理解、上下文压缩、Skills 与 MCP 工具。</p>
         </div>
 
-        <div
-          v-for="(m, idx) in messages"
+        <MessageItem
+          v-for="m in messages"
           :key="m.id"
-          class="msg"
-          :class="'role-' + m.role"
-        >
-          <!-- 用户消息 -->
-          <template v-if="m.role === 'user'">
-            <div class="user-msg">
-              <div v-if="m.attachments && m.attachments.length" class="att-thumbs">
-                <img
-                  v-for="(a, i) in m.attachments"
-                  :key="i"
-                  :src="a.preview || ('data:image/png;base64,' + a.base64)"
-                  class="att-thumb"
-                  alt="附件"
-                />
-              </div>
-              <div v-if="m.content" class="bubble user-bubble">
-                {{ m.content }}
-              </div>
-            </div>
-          </template>
-
-          <!-- 思考分区 -->
-          <template v-else-if="m.role === 'thinking'">
-            <div class="bubble thinking-bubble">
-              <span class="tag">思考</span>
-              <span class="thinking-text">{{ m.content || '…' }}</span>
-            </div>
-          </template>
-
-          <!-- 工具调用状态行 -->
-          <template v-else-if="m.role === 'tool_call'">
-            <div class="status-row">
-              <span class="state" :class="m.status">
-                {{ stateSymbol(m.status) }}
-              </span>
-              <span class="s-tool">{{ m.tool || '工具' }}</span>
-              <span v-if="m.detail" class="s-detail">{{ m.detail }}</span>
-              <span class="state-text" :class="m.status">{{ stateText(m.status) }}</span>
-            </div>
-          </template>
-
-          <!-- 压缩状态行 -->
-          <template v-else-if="m.role === 'compression'">
-            <div class="status-row compression">
-              <span class="state" :class="m.status">
-                {{ stateSymbol(m.status) }}
-              </span>
-              <span class="s-tool">上下文压缩</span>
-              <span v-if="m.detail" class="s-detail">{{ m.detail }}</span>
-              <span class="state-text" :class="m.status">{{ stateText(m.status) }}</span>
-            </div>
-          </template>
-
-          <!-- 助手/assistant 流式内容 -->
-          <template v-else>
-            <div class="bubble assistant-bubble">
-              <span class="typing" v-if="streaming && idx === messages.length - 1">
-                <span class="cursor">▍</span>
-              </span>
-              <span class="content">{{ m.content || '' }}</span>
-            </div>
-          </template>
-        </div>
+          :message="m"
+          :streaming="streaming && m.id === lastMessageId"
+        />
       </div>
 
       <!-- 输入区 -->
       <div class="composer">
-        <div v-if="attachments.length" class="pending-att">
-          <img
-            v-for="(a, i) in attachments"
-            :key="i"
-            :src="a.preview"
-            class="att-thumb"
-            alt="待发送"
-          />
+        <div v-if="pendingAttachments.length" class="pending-att">
+          <div v-for="(a, i) in pendingAttachments" :key="i" class="pending-thumb-wrap">
+            <img :src="a.preview" class="att-thumb" alt="待发送" />
+            <button class="remove-att" title="移除" @click="removeAttachment(i)">✕</button>
+          </div>
         </div>
 
         <div class="composer-row">
@@ -126,7 +100,7 @@
             title="添加图片"
             @click="pickImage"
           >
-            +
+            ＋
           </button>
           <input
             type="file"
@@ -141,13 +115,14 @@
             rows="1"
             placeholder="输入消息，回车发送"
             @keydown.enter.exact.prevent="send"
+            @input="autoGrow"
           ></textarea>
           <button
             class="primary send-btn"
-            :disabled="streaming || (!input.trim() && !attachments.length)"
+            :disabled="streaming || (!input.trim() && !pendingAttachments.length)"
             @click="send"
           >
-            发送
+            {{ streaming ? '生成中…' : '发送' }}
           </button>
         </div>
       </div>
@@ -156,59 +131,60 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import {
   getSessions,
   createSession,
+  getSession,
   deleteSession,
+  archiveSession,
   uploadImage,
-  triggerCompress
+  triggerCompress,
+  getModels,
+  fileUrl
 } from '../api'
+import { getToken } from '../api/http'
+import MessageItem from '../components/MessageItem.vue'
 
 const messages = ref([])
 const sessions = ref([])
 const currentSessionId = ref(null)
 const input = ref('')
-const attachments = ref([])
+const pendingAttachments = ref([])
 const streaming = ref(false)
 const wsState = ref('disconnected')
+const currentModel = ref('')
+const thinkingLevel = ref('normal')
+const currentModelOptions = ref([])
 
 const fileInput = ref(null)
 const scroller = ref(null)
 
 let socket = null
 let msgSeq = 0
-let assistantSeq = 1
+let socketSessionId = null
+let manualClose = false
+let reconnectTimer = null
 
-const wsText = computed(() => {
-  if (wsState.value === 'connected') return '● 已连接'
-  if (wsState.value === 'connecting') return '◔ 连接中'
-  return '○ 未连接'
-})
-
-const wsUrl = computed(
-  () =>
-    `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/chat`
+const lastMessageId = computed(() =>
+  messages.value.length ? messages.value[messages.value.length - 1].id : null
 )
 
-function newId(prefix) {
+const wsText = computed(() => {
+  if (wsState.value === 'connected') return '已连接'
+  if (wsState.value === 'connecting') return '连接中'
+  return '未连接'
+})
+
+const wsUrl = computed(() => {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+  const token = getToken()
+  return `${proto}://${location.host}/api/chat?token=${encodeURIComponent(token)}`
+})
+
+function nextId() {
   msgSeq += 1
-  return `${prefix}-${msgSeq}`
-}
-
-function stateSymbol(status) {
-  if (status === 'done' || status === 'ok' || status === 'success') return '✓'
-  if (status === 'error' || status === 'failed') return '✕'
-  if (status === 'running' || status === 'streaming') return '◔'
-  return '○'
-}
-
-function stateText(status) {
-  if (status === 'done' || status === 'ok' || status === 'success') return '完成'
-  if (status === 'error' || status === 'failed') return '失败'
-  if (status === 'running' || status === 'streaming') return '运行中'
-  if (status === 'queued') return '排队中'
-  return '待处理'
+  return `m-${msgSeq}`
 }
 
 function scrollToBottom() {
@@ -217,59 +193,125 @@ function scrollToBottom() {
   })
 }
 
+function autoGrow(e) {
+  const el = e.target
+  el.style.height = 'auto'
+  el.style.height = Math.min(el.scrollHeight, 140) + 'px'
+}
+
+/* ---------- 历史消息归一化 ---------- */
+function normalizeHistory(raw) {
+  const out = []
+  for (const m of raw || []) {
+    const role = m.role
+    if (role === 'assistant_delta') {
+      const last = out[out.length - 1]
+      const text = m.content || ''
+      if (last && last.role === 'assistant') last.content += text
+      else if (text) out.push({ id: nextId(), role: 'assistant', content: text })
+    } else if (role === 'tool_call') {
+      out.push({
+        id: nextId(),
+        role: 'tool_call',
+        name: m.name || '工具',
+        status: m.status || 'done',
+        arguments: m.arguments,
+        result: m.result
+      })
+    } else if (role === 'tool') {
+      out.push({ id: nextId(), role: 'tool', name: m.name || '工具', content: m.content })
+    } else if (role === 'user') {
+      const attachments = (m.attachments || [])
+        .filter((a) => typeof a === 'string')
+        .map((id) => ({ object_id: id }))
+      out.push({ id: nextId(), role: 'user', content: m.content || '', attachments })
+    } else if (role === 'assistant' || role === 'thinking') {
+      out.push({ id: nextId(), role, content: m.content || '' })
+    } else {
+      out.push({ id: nextId(), role: 'assistant', content: m.content || '' })
+    }
+  }
+  return out
+}
+
 /* ---------- WebSocket ---------- */
-function connectWS() {
-  if (socket && socket.readyState === WebSocket.OPEN) return
+function connectWS(sessionId) {
+  if (socket && socket.readyState === WebSocket.OPEN && socketSessionId === sessionId) return
+  closeSocket()
+  manualClose = false
+  socketSessionId = sessionId
   wsState.value = 'connecting'
-  socket = new WebSocket(wsUrl.value)
+  socket = new WebSocket(`${wsUrl.value}&session_id=${encodeURIComponent(sessionId)}`)
   socket.onopen = () => {
     wsState.value = 'connected'
   }
   socket.onclose = () => {
     wsState.value = 'disconnected'
-    if (streaming.value) {
-      streaming.value = false
+    streaming.value = false
+    socketSessionId = null
+    socket = null
+    if (!manualClose) {
+      reconnectTimer = setTimeout(() => {
+        if (currentSessionId.value) connectWS(currentSessionId.value)
+      }, 3000)
     }
   }
   socket.onerror = () => {
     wsState.value = 'disconnected'
   }
-  socket.onmessage = (ev) => {
-    handleMessage(ev.data)
+  socket.onmessage = (ev) => handleMessage(ev.data)
+}
+
+function closeSocket() {
+  manualClose = true
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
   }
+  if (socket) {
+    try {
+      socket.onclose = null
+      socket.close()
+    } catch (e) {
+      /* ignore */
+    }
+    socket = null
+  }
+  socketSessionId = null
 }
 
 function handleMessage(raw) {
-  let data = raw
-  if (typeof raw === 'string') {
-    try {
-      data = JSON.parse(raw)
-    } catch (e) {
-      // 纯文本：当作 assistant delta
-      appendAssistantDelta(raw)
-      return
-    }
+  let data
+  try {
+    data = JSON.parse(raw)
+  } catch (e) {
+    appendDelta(raw)
+    return
   }
   if (!data || typeof data !== 'object') return
   const type = data.type || 'delta'
   switch (type) {
     case 'delta':
-      appendAssistantDelta(data.content)
+      appendDelta(data.content || data.text || '')
       break
-    case 'message':
-      handleFullMessage(data)
+    case 'assistant_message':
+      messages.value.push({ id: nextId(), role: 'assistant', content: data.content || '' })
       break
     case 'thinking':
-      handleThinking(data)
+      appendThinking(data.text || data.content || '')
       break
     case 'tool_call':
-      handleToolCall(data)
+      upsertToolCall(data)
       break
-    case 'compression':
-      handleCompression(data)
+    case 'tool':
+      upsertToolResult(data)
+      break
+    case 'info':
+      messages.value.push({ id: nextId(), role: 'info', content: data.text || '' })
       break
     case 'error':
-      appendAssistantDelta(`\n[错误] ${data.message || '未知错误'}`)
+      streaming.value = false
+      messages.value.push({ id: nextId(), role: 'error', content: data.message || '未知错误' })
       break
     case 'done':
     case 'end':
@@ -277,97 +319,65 @@ function handleMessage(raw) {
       streaming.value = false
       break
     default:
-      // fallback：若带 content 且是 assistant 则追加
-      if (data.content && data.role !== 'user') {
-        appendAssistantDelta(data.content)
-      }
+      if (data.content && data.role !== 'user') appendDelta(data.content)
       break
   }
   scrollToBottom()
 }
 
-function appendAssistantDelta(text) {
+function appendDelta(text) {
   if (!text) return
-  let last = messages.value[messages.value.length - 1]
-  if (!last || last.role !== 'assistant') {
-    last = { id: newId('assistant'), role: 'assistant', content: '' }
-    messages.value.push(last)
-  }
-  if (streaming.value === false) streaming.value = true
-  last.content += text
-  scrollToBottom()
-}
-
-function handleFullMessage(data) {
-  const role = data.role || 'assistant'
-  if (role === 'user') {
-    messages.value.push({
-      id: newId('user-msg'),
-      role: 'user',
-      content: data.content || '',
-      attachments: data.attachments || []
-    })
-  } else if (role === 'thinking') {
-    handleThinking(data)
-  } else if (role === 'tool_call') {
-    handleToolCall(data)
+  const last = messages.value[messages.value.length - 1]
+  if (last && last.role === 'assistant' && streaming.value) {
+    last.content += text
   } else {
-    messages.value.push({
-      id: newId('assistant'),
-      role: 'assistant',
-      content: data.content || data.text || ''
-    })
+    messages.value.push({ id: nextId(), role: 'assistant', content: text })
   }
-  scrollToBottom()
+  streaming.value = true
 }
 
-function handleThinking(data) {
-  // 若最后一条是 thinking 则追加，否则新建
-  let last = messages.value[messages.value.length - 1]
-  const content = data.content || data.text || ''
-  if (last && last.role === 'thinking') {
-    last.content += content
-  } else if (content) {
-    messages.value.push({ id: newId('thinking'), role: 'thinking', content })
-  }
+function appendThinking(text) {
+  if (!text) return
+  const last = messages.value[messages.value.length - 1]
+  if (last && last.role === 'thinking') last.content += text
+  else messages.value.push({ id: nextId(), role: 'thinking', content: text })
 }
 
-function handleToolCall(data) {
-  const name = data.name || data.tool || data.tool_name || '工具'
-  // 更新已存在的同名工具行
+function upsertToolCall(data) {
+  const name = data.name || '工具'
   const existing = messages.value.find(
-    (m) => m.role === 'tool_call' && m.tool === name
+    (m) => m.role === 'tool_call' && m.name === name && m.status === 'running'
   )
-  const status = data.status || 'running'
-  const detail = data.detail || data.arguments || ''
   if (existing) {
-    existing.status = status
-    if (detail) existing.detail = detail
-    if (status === 'done' || status === 'error') streaming.value = false
+    existing.status = data.status || existing.status
+    if (data.arguments !== undefined) existing.arguments = data.arguments
+    if (data.result !== undefined) existing.result = data.result
   } else {
     messages.value.push({
-      id: newId('toolcall'),
+      id: nextId(),
       role: 'tool_call',
-      tool: name,
-      status,
-      detail
+      name,
+      status: data.status || 'running',
+      arguments: data.arguments,
+      result: data.result
     })
   }
 }
 
-function handleCompression(data) {
-  const status = data.status || (data.started ? 'running' : 'done')
-  const detail = data.detail || data.message || ''
-  const existing = messages.value.find((m) => m.role === 'compression')
+function upsertToolResult(data) {
+  const id = data.tool_call_id
+  const existing = messages.value.find(
+    (m) => m.role === 'tool_call' && (m.tool_call_id === id || (id && m.name === data.name))
+  )
   if (existing) {
-    existing.status = status
-    if (detail) existing.detail = detail
+    existing.status = 'done'
+    if (data.content !== undefined) existing.result = data.content
   } else {
     messages.value.push({
-      id: newId('compress'),
-      role: 'compression',
-      status,
-      detail
+      id: nextId(),
+      role: 'tool',
+      name: data.name || '工具',
+      content: data.content || ''
     })
   }
 }
@@ -375,58 +385,103 @@ function handleCompression(data) {
 /* ---------- 会话管理 ---------- */
 async function loadSessions() {
   try {
-    const list = await getSessions()
-    sessions.value = Array.isArray(list) ? list : list?.sessions || []
+    const res = await getSessions()
+    sessions.value = res?.sessions || []
   } catch (e) {
     sessions.value = []
+    notify(e.message, 'error')
   }
 }
 
-async function newSession() {
+async function createNewSession() {
   try {
-    const s = await createSession()
-    const session = {
-      id: s.id || s.session_id,
-      title: s.title || '新会话'
-    }
-    sessions.value.push(session)
-    await switchSession(session)
+    const res = await createSession()
+    const id = res.id || res.session_id
+    await loadSessions()
+    await switchSession(id)
   } catch (e) {
-    alert('新建会话失败：' + e.message)
+    notify('新建会话失败：' + e.message, 'error')
   }
 }
 
-async function switchSession(s) {
-  currentSessionId.value = s.id || s.session_id
-  messages.value = []
+async function switchSession(id) {
+  currentSessionId.value = id
   streaming.value = false
+  messages.value = []
+  try {
+    const res = await getSession(id)
+    messages.value = normalizeHistory(res?.messages || [])
+  } catch (e) {
+    messages.value = []
+  }
+  connectWS(id)
   scrollToBottom()
 }
 
-async function removeSession(id) {
-  if (!confirm('确定删除该会话？')) return
+async function remove(id) {
+  if (!window.confirm('确定删除该会话？')) return
   try {
     await deleteSession(id)
-    sessions.value = sessions.value.filter((s) => (s.id || s.session_id) !== id)
-    if ((currentSessionId.value || '') === String(id)) {
+    await loadSessions()
+    if (currentSessionId.value === id) {
       currentSessionId.value = null
       messages.value = []
+      closeSocket()
     }
   } catch (e) {
-    alert('删除会话失败：' + e.message)
+    notify('删除会话失败：' + e.message, 'error')
+  }
+}
+
+async function archive(id) {
+  try {
+    await archiveSession(id)
+    await loadSessions()
+    if (currentSessionId.value === id) {
+      currentSessionId.value = null
+      messages.value = []
+      closeSocket()
+    }
+  } catch (e) {
+    notify('归档失败：' + e.message, 'error')
   }
 }
 
 async function compressNow() {
   if (!currentSessionId.value) return
   try {
-    handleCompression({ status: 'running', detail: '正在压缩…' })
-    const r = await triggerCompress(currentSessionId.value)
-    handleCompression({ status: 'done', detail: r?.message || '已完成' })
+    await triggerCompress(currentSessionId.value)
+    notify('上下文已压缩', 'ok')
+    await switchSession(currentSessionId.value)
   } catch (e) {
-    handleCompression({ status: 'error', detail: e.message })
+    notify('压缩失败：' + e.message, 'error')
   }
-  scrollToBottom()
+}
+
+/* ---------- 模型与思考强度 ---------- */
+async function loadModelsMeta() {
+  try {
+    const data = await getModels()
+    const endpoints = data?.endpoints || {}
+    const opts = []
+    for (const [key, ep] of Object.entries(endpoints)) {
+      if (ep.enabled && ep.model_name) opts.push(ep.model_name)
+    }
+    currentModelOptions.value = [...new Set(opts)]
+    const main = endpoints.main
+    currentModel.value = main?.model_name || currentModelOptions.value[0] || ''
+  } catch (e) {
+    currentModelOptions.value = []
+  }
+}
+
+function onSwitchModel() {
+  if (!currentModel.value) return
+  ensureSocketAndSend({ type: 'switch_model', model_name: currentModel.value })
+}
+
+function onSetThinking() {
+  ensureSocketAndSend({ type: 'set_thinking', level: thinkingLevel.value })
 }
 
 /* ---------- 附件与发送 ---------- */
@@ -434,88 +489,93 @@ function pickImage() {
   fileInput.value?.click()
 }
 
-function readAsBase64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      const result = reader.result
-      // 移除 data URL 前缀，仅保留 base64
-      const comma = result.indexOf(',')
-      resolve(comma >= 0 ? result.slice(comma + 1) : result)
-    }
-    reader.onerror = () => reject(reader.error)
-    reader.readAsDataURL(file)
-  })
-}
-
 async function onFileChange(e) {
   const file = e.target.files?.[0]
   e.target.value = ''
   if (!file) return
   try {
-    const upload = await uploadImage(file)
-    const objectId = upload?.object_id || upload?.id
-    const preview = URL.createObjectURL(file)
-    const base64 = await readAsBase64(file)
-    attachments.value.push({
+    const res = await uploadImage(file)
+    const objectId = res?.object_id || res?.id
+    if (!objectId) throw new Error('上传未返回 object_id')
+    pendingAttachments.value.push({
       object_id: objectId,
-      base64,
-      preview,
+      preview: URL.createObjectURL(file),
       name: file.name
     })
-    scrollToBottom()
   } catch (err) {
-    alert('上传图片失败：' + err.message)
+    notify('上传图片失败：' + err.message, 'error')
   }
+}
+
+function removeAttachment(i) {
+  pendingAttachments.value.splice(i, 1)
+}
+
+function ensureSocketAndSend(payload) {
+  if (!currentSessionId.value) return
+  if (!socket || socket.readyState !== WebSocket.OPEN || socketSessionId !== currentSessionId.value) {
+    connectWS(currentSessionId.value)
+  }
+  socket.send(JSON.stringify(payload))
 }
 
 async function send() {
   const content = input.value.trim()
-  const attachmentPayload = attachments.value.map((a) => ({
-    object_id: a.object_id,
-    base64: a.base64
-  }))
+  const attachmentIds = pendingAttachments.value.map((a) => a.object_id)
+  if (!content && !attachmentIds.length) return
+  if (!currentSessionId.value) {
+    try {
+      const res = await createSession()
+      await loadSessions()
+      currentSessionId.value = res.id || res.session_id
+    } catch (e) {
+      notify('创建会话失败：' + e.message, 'error')
+      return
+    }
+  }
 
-  if (!content && !attachmentPayload.length) return
-  if (streaming.value && content) return
-
-  // 推送用户消息到界面
   messages.value.push({
-    id: newId('user'),
+    id: nextId(),
     role: 'user',
     content,
-    attachments: attachmentPayload.map((a, i) => ({
-      ...a,
-      preview: attachments.value[i].preview
-    }))
+    attachments: pendingAttachments.value.map((a) => ({ object_id: a.object_id, preview: a.preview }))
   })
   scrollToBottom()
 
   input.value = ''
-  attachments.value = []
+  pendingAttachments.value = []
 
-  connectWS()
-  const payload = {
+  ensureSocketAndSend({
     type: 'chat',
     session_id: currentSessionId.value,
     content,
-    attachments: attachmentPayload
-  }
-  try {
-    socket.send(JSON.stringify(payload))
-    streaming.value = true
-  } catch (e) {
-    streaming.value = false
-    appendAssistantDelta('\n[发送失败] 连接尚未建立，请重试。')
-  }
+    attachments: attachmentIds
+  })
 }
 
-onMounted(() => {
-  loadSessions()
+/* ---------- 提示 ---------- */
+let noticeTimer = null
+const notice = ref({ text: '', type: 'ok' })
+function notify(text, type = 'ok') {
+  notice.value = { text, type }
+  if (noticeTimer) clearTimeout(noticeTimer)
+  noticeTimer = setTimeout(() => {
+    notice.value = { text: '', type: 'ok' }
+  }, 3000)
+}
+
+watch(messages, scrollToBottom, { deep: true })
+
+onMounted(async () => {
+  await Promise.all([loadSessions(), loadModelsMeta()])
+  // 默认打开最近会话（列表首条）
+  if (sessions.value.length) {
+    await switchSession(sessions.value[0].id)
+  }
 })
 
 onUnmounted(() => {
-  socket?.close()
+  closeSocket()
 })
 </script>
 
@@ -525,11 +585,36 @@ onUnmounted(() => {
   flex: 1 1 auto;
   min-height: 0;
   background: var(--bg-panel);
+  position: relative;
+}
+
+.notice {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 13px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.notice.ok {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.notice.err {
+  color: var(--err);
+  border-color: var(--err);
 }
 
 /* 侧栏 */
 .sidebar {
-  width: 240px;
+  width: 260px;
   flex: 0 0 auto;
   border-right: 1px solid var(--border);
   background: var(--bg);
@@ -576,7 +661,7 @@ onUnmounted(() => {
 .session-item {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 4px;
   padding: 8px 10px;
   border-radius: 6px;
   cursor: pointer;
@@ -594,24 +679,41 @@ onUnmounted(() => {
 }
 
 .s-name {
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
 }
 
-.del {
+.s-status {
+  color: var(--warn);
+  font-size: 12px;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.s-action {
   border: none;
   background: transparent;
   color: var(--text-weak);
-  padding: 0 4px;
+  padding: 0 3px;
   font-size: 12px;
   flex: 0 0 auto;
 }
 
-.del:hover {
-  color: var(--err);
+.s-action:hover {
+  color: var(--warn);
   background: transparent;
+}
+
+.s-action.danger:hover {
+  color: var(--err);
 }
 
 .compress-btn {
@@ -627,6 +729,47 @@ onUnmounted(() => {
   min-width: 0;
 }
 
+.chat-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel);
+  font-size: 12px;
+}
+
+.tool-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-weak);
+}
+
+.tool-item select {
+  padding: 4px 8px;
+  font-size: 12px;
+  max-width: 220px;
+}
+
+.toolbar-spacer {
+  flex: 1 1 auto;
+}
+
+.conn-state {
+  color: var(--text-weak);
+  white-space: nowrap;
+}
+
+.conn-state.connected {
+  color: var(--ok);
+}
+
+.conn-state.connecting {
+  color: var(--warn);
+}
+
 .messages {
   flex: 1 1 auto;
   overflow-y: auto;
@@ -638,148 +781,21 @@ onUnmounted(() => {
 
 .empty {
   align-self: center;
-  margin-top: 40px;
-  color: var(--text-weak);
-  font-size: 13px;
-}
-
-.msg {
-  max-width: 100%;
-}
-
-/* 用户消息 */
-.user-msg {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 6px;
-}
-
-.att-thumbs {
-  display: flex;
-  gap: 8px;
-  justify-content: flex-end;
-}
-
-.att-thumb {
-  width: 64px;
-  height: 64px;
-  object-fit: cover;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-}
-
-.bubble {
-  border-radius: 10px;
-  padding: 9px 13px;
-  max-width: 78%;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.user-bubble {
-  background: var(--accent);
-  color: #fff;
-}
-
-.assistant-bubble {
-  background: var(--bg);
-  border: 1px solid var(--border);
-}
-
-/* thinking */
-.thinking-bubble {
-  background: var(--accent-weak);
-  color: var(--text-weak);
-  font-size: 13px;
-  border-left: 3px solid var(--accent);
-  border-radius: 4px;
-}
-
-.tag {
-  font-weight: 600;
-  margin-right: 6px;
-}
-
-.thinking-text {
-  color: var(--text);
-}
-
-.typing .cursor {
-  animation: blink 1s steps(1) infinite;
-  color: var(--accent);
-}
-
-@keyframes blink {
-  50% {
-    opacity: 0;
-  }
-}
-
-/* 状态行 */
-.status-row {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 6px 12px;
-  font-size: 13px;
-  color: var(--text);
-}
-
-.status-row.compression {
-  border-style: dashed;
-}
-
-.state {
-  width: 18px;
+  margin-top: 60px;
   text-align: center;
   color: var(--text-weak);
+  font-size: 13px;
 }
 
-.state.done {
-  color: var(--ok);
+.empty p {
+  margin: 4px 0;
 }
 
-.state.error {
-  color: var(--err);
-}
-
-.state.running {
-  color: var(--warn);
-  animation: pulse 1.2s ease-in-out infinite;
-}
-
-@keyframes pulse {
-  50% {
-    opacity: 0.35;
-  }
-}
-
-.s-tool {
-  font-weight: 500;
-}
-
-.s-detail {
-  color: var(--text-weak);
-}
-
-.state-text {
-  color: var(--text-weak);
+.empty .hint {
+  color: #aab2ba;
   font-size: 12px;
 }
 
-.state-text.done {
-  color: var(--ok);
-}
-
-.state-text.error {
-  color: var(--err);
-}
-
-/* 输入区 */
 .composer {
   flex: 0 0 auto;
   border-top: 1px solid var(--border);
@@ -793,6 +809,34 @@ onUnmounted(() => {
 .pending-att {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pending-thumb-wrap {
+  position: relative;
+}
+
+.att-thumb {
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+
+.remove-att {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
+  line-height: 1;
+  padding: 0;
+  font-size: 10px;
+  border-radius: 50%;
+  background: var(--err);
+  color: #fff;
+  border: none;
 }
 
 .composer-row {
@@ -816,6 +860,7 @@ onUnmounted(() => {
   min-height: 36px;
   max-height: 140px;
   line-height: 1.5;
+  overflow-y: auto;
 }
 
 .send-btn {

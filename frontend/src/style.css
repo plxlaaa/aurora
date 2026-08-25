@@ -76,6 +76,7 @@ button.danger:hover {
 
 input[type="text"],
 input[type="password"],
+input[type="number"],
 select,
 textarea {
   font-family: inherit;
@@ -111,4 +112,120 @@ a {
 
 ::-webkit-scrollbar-thumb:hover {
   background: #bfc6cc;
+}
+
+/* 通用卡片与面板 */
+.card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px;
+}
+
+.card-title {
+  margin: 0 0 14px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+/* 状态标签 */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--text-weak);
+  white-space: nowrap;
+}
+
+.badge.ok {
+  color: var(--ok);
+  border-color: var(--ok);
+  background: #eefaf1;
+}
+
+.badge.warn {
+  color: var(--warn);
+  border-color: var(--warn);
+  background: #fdf6e8;
+}
+
+.badge.err {
+  color: var(--err);
+  border-color: var(--err);
+  background: #fdefeb;
+}
+
+.badge.na {
+  color: var(--text-weak);
+}
+
+/* 表单布局 */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-weak);
+}
+
+.field > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.field.check {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  align-self: end;
+  padding-bottom: 8px;
+  color: var(--text);
+}
+
+.field.inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+.field.full {
+  grid-column: 1 / -1;
+}
+
+textarea {
+  resize: vertical;
+  min-height: 60px;
+}
+
+/* 通知条 */
+.notice {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+.notice.ok {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.notice.err {
+  color: var(--err);
+  border-color: var(--err);
 }

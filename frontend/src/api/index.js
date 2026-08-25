@@ -1,0 +1,68 @@
+// 后端 API 统一入口。所有端点与 backend/app/routers/api.py 对应。
+
+import { http } from './http'
+
+const base = (path) => `/api${path}`
+
+// ---- 鉴权 ----
+export const login = (password = '', apiKey = '') =>
+  http.post(base('/auth/login'), { password, api_key: apiKey })
+
+// ---- 模型端点 / 视觉路由 / 压缩 ----
+export const getModels = () => http.get(base('/models'))
+export const saveModels = (payload) => http.put(base('/models'), payload)
+
+export const getModelCatalog = () => http.get(base('/models/catalog'))
+export const saveModelCatalog = (payload) => http.put(base('/models/catalog'), payload)
+
+// ---- 执行环境 ----
+export const getSandbox = () => http.get(base('/sandbox'))
+export const saveSandbox = (payload) => http.put(base('/sandbox'), payload)
+
+// ---- Skills ----
+export const getSkills = () => http.get(base('/skills'))
+export const toggleSkill = (name, enabled) => http.put(base(`/skills/${name}`), { enabled })
+
+// ---- MCP ----
+export const getMcpServers = () => http.get(base('/mcp'))
+
+// ---- 附件 ----
+export const uploadImage = (file) => http.upload(base('/upload'), file)
+export const fileUrl = (objectId) => base(`/files/${encodeURIComponent(objectId)}`)
+
+// ---- 代码执行 ----
+export const runCode = (code) => http.post(base('/run-code'), { code })
+
+// ---- 压缩 ----
+export const triggerCompress = (sessionId) =>
+  http.post(base('/compress'), { session_id: sessionId })
+
+// ---- 会话 ----
+export const getSessions = () => http.get(base('/sessions'))
+export const createSession = () => http.post(base('/sessions'))
+export const getSession = (id) => http.get(base(`/sessions/${encodeURIComponent(id)}`))
+export const deleteSession = (id) => http.del(base(`/sessions/${encodeURIComponent(id)}`))
+export const archiveSession = (id) =>
+  http.post(base(`/sessions/${encodeURIComponent(id)}/archive`))
+
+export default {
+  login,
+  getModels,
+  saveModels,
+  getModelCatalog,
+  saveModelCatalog,
+  getSandbox,
+  saveSandbox,
+  getSkills,
+  toggleSkill,
+  getMcpServers,
+  uploadImage,
+  fileUrl,
+  runCode,
+  triggerCompress,
+  getSessions,
+  createSession,
+  getSession,
+  deleteSession,
+  archiveSession
+}
