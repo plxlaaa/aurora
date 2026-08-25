@@ -138,46 +138,54 @@ class ChatPipeline:
                 await sink({"type": "done"})
                 return {"done": True, "content": full_content}
 
-            # 执行工具调用
-            for call in completed_calls:
-                name = call["function"]["name"]
-                try:
-                    arguments = json.loads(call["function"]["arguments"] or "{}")
-                except json.JSONDecodeError:
-                    arguments = {}
-                await sink({
-                    "type": "tool_call",
-                    "name": name,
-                    "status": "running",
-                    "arguments": arguments,
-                })
-                try:
-                    if name.startswith("mcp_"):
-                        result = await self.mcp.dispatch(name, arguments)
-                    else:
-                        result = await self.skills.execute(name, arguments)
-                except Exception as exc:  # noqa: BLE001
-                    result = {"error": f"工具调用失败: {exc}"}
-                await sink(
-                    {
-                        "type": "tool_call",
-                        "name": name,
-                        "status": "done",
-                        "arguments": arguments,
-                        "result": result,
-                    }
-                )
-                history.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call.get("id") or name,
-                        "name": name,
-                        "content": json.dumps(result, ensure_ascii=False),
-                    }
-                )
+            await self._execute_tools(completed_calls, history, sink)
 
         await sink({"type": "done", "result": "达到最大工具调用轮次"})
         return {"done": True}
+
+    async def _execute_tools(
+        self,
+        completed_calls: list[dict[str, Any]],
+        history: list[dict[str, Any]],
+        sink: DeltaSink,
+    ) -> None:
+        """执行模型请求的工具调用，将结果以 tool 消息回填历史。"""
+        for call in completed_calls:
+            name = call["function"]["name"]
+            try:
+                arguments = json.loads(call["function"]["arguments"] or "{}")
+            except json.JSONDecodeError:
+                arguments = {}
+            await sink({
+                "type": "tool_call",
+                "name": name,
+                "status": "running",
+                "arguments": arguments,
+            })
+            try:
+                if name.startswith("mcp_"):
+                    result = await self.mcp.dispatch(name, arguments)
+                else:
+                    result = await self.skills.execute(name, arguments)
+            except Exception as exc:  # noqa: BLE001
+                result = {"error": f"工具调用失败: {exc}"}
+            await sink(
+                {
+                    "type": "tool_call",
+                    "name": name,
+                    "status": "done",
+                    "arguments": arguments,
+                    "result": result,
+                }
+            )
+            history.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call.get("id") or name,
+                    "name": name,
+                    "content": json.dumps(result, ensure_ascii=False),
+                }
+            )
 
     # -- 视觉独立端点往返 --
     async def _vision_roundtrip(

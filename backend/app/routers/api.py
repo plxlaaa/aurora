@@ -1,7 +1,7 @@
 """FastAPI 网关 REST 与 WebSocket 端点。
 
 端点：
-- GET  /api/health          健康检查
+- GET  /api/health          健康检查（无需鉴权）
 - GET  /api/models          端点状态快照
 - PUT  /api/models          保存模型配置（热刷新）
 - GET  /api/sandbox         沙箱配置/状态
@@ -9,23 +9,27 @@
 - GET  /api/skills          Skills 列表
 - PUT  /api/skills/{name}   启停 skill
 - GET  /api/mcp             MCP server 状态
+- GET  /api/models/catalog  模型目录
 - POST /api/upload          附件上传
 - GET  /api/files/{id}      附件读取
 - POST /api/run-code        执行代码（沙箱/local）
 - POST /api/compress        手动触发压缩
 - GET  /api/sessions        会话列表
+- POST /api/sessions        新建会话
+- GET  /api/sessions/{id}   读取会话
 - DELETE /api/sessions/{id} 清空会话
+- POST /api/sessions/{id}/archive  归档会话
+- POST /api/auth/login      换取 JWT（无需鉴权）
 - WS   /api/chat            对话 WebSocket
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 
 from ..core import auth
-from ..services.skills import SKILLS_DIR
 from ..services.upload import UploadError, load_object, save_upload
 
 from .deps import compressor, executor, logger, mcp_mgr, pipeline, registry, sessions, settings, skills_mgr, vision
@@ -33,7 +37,8 @@ from .deps import compressor, executor, logger, mcp_mgr, pipeline, registry, ses
 router = APIRouter()
 
 
-def _check_auth(authorization: str | None) -> None:
+def require_auth(authorization: Annotated[str | None, Header()] = None) -> None:
+    """除 health/login 外所有 REST 端点的统一鉴权依赖。"""
     if not auth.auth_enabled():
         return
     token = None
@@ -50,8 +55,7 @@ async def health() -> dict[str, Any]:
 
 
 @router.get("/api/models")
-async def list_models(authorization: str | None = None) -> dict[str, Any]:
-    _check_auth(authorization)
+async def list_models(_: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
     await registry.probe_all()
     return {
         "endpoints": registry.snapshot(),
@@ -61,8 +65,9 @@ async def list_models(authorization: str | None = None) -> dict[str, Any]:
 
 
 @router.put("/api/models")
-async def update_models(payload: dict[str, Any], authorization: str | None = None) -> dict[str, Any]:
-    _check_auth(authorization)
+async def update_models(
+    payload: dict[str, Any], _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
     current = settings.raw("models")
     if "endpoints" in payload:
         current["endpoints"] = payload["endpoints"]
@@ -77,61 +82,41 @@ async def update_models(payload: dict[str, Any], authorization: str | None = Non
 
 
 @router.get("/api/sandbox")
-async def get_sandbox(authorization: str | None = None) -> dict[str, Any]:
-    _check_auth(authorization)
+async def get_sandbox(_: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
     return settings.sandbox()
 
 
 @router.put("/api/sandbox")
-async def update_sandbox(payload: dict[str, Any], authorization: str | None = None) -> dict[str, Any]:
-    _check_auth(authorization)
+async def update_sandbox(
+    payload: dict[str, Any], _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
     settings.update("sandbox", payload)
     return {"ok": True, "sandbox": settings.sandbox()}
 
 
 @router.get("/api/skills")
-async def list_skills(authorization: str | None = None) -> dict[str, Any]:
-    _check_auth(authorization)
+async def list_skills(_: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
     return {"skills": skills_mgr.list()}
 
 
 @router.put("/api/skills/{name}")
-async def toggle_skill(name: str, payload: dict[str, Any], authorization: str | None = None) -> dict[str, Any]:
-    _check_auth(authorization)
-    import os
-    from pathlib import Path
-
-    import yaml
-
-    from ..services.skills import SKILLS_DIR
-
-    manifest_path = None
-    for p in Path(SKILLS_DIR).glob("*/manifest.yaml"):
-        with open(p, encoding="utf-8") as fh:
-            manifest = yaml.safe_load(fh) or {}
-        if manifest.get("name") == name:
-            manifest_path = p
-            break
-    if manifest_path is None:
+async def toggle_skill(
+    name: str, payload: dict[str, Any], _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
+    if "enabled" not in payload:
+        raise HTTPException(status_code=400, detail="缺少 enabled 字段")
+    if not skills_mgr.set_enabled(name, bool(payload["enabled"])):
         raise HTTPException(status_code=404, detail=f"skill 不存在: {name}")
-    with open(manifest_path, encoding="utf-8") as fh:
-        manifest = yaml.safe_load(fh) or {}
-    if "enabled" in payload:
-        manifest["enabled"] = payload["enabled"]
-    with open(manifest_path, "w", encoding="utf-8") as fh:
-        yaml.safe_dump(manifest, fh, allow_unicode=True, sort_keys=False)
-    skills_mgr.reload()
     return {"ok": True}
 
 
 @router.get("/api/mcp")
-async def list_mcp(authorization: str | None = None) -> dict[str, Any]:
-    _check_auth(authorization)
+async def list_mcp(_: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
     return {"servers": mcp_mgr.list()}
 
 
 @router.get("/api/models/catalog")
-async def model_catalog(authorization: str | None = None) -> dict[str, Any]:
+async def model_catalog(_: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
     raw = settings.raw("models")
     return {
         "endpoints": registry.snapshot(),
@@ -140,7 +125,9 @@ async def model_catalog(authorization: str | None = None) -> dict[str, Any]:
 
 
 @router.put("/api/models/catalog")
-async def save_model_catalog(payload: dict[str, Any], authorization: str | None = None) -> dict[str, Any]:
+async def save_model_catalog(
+    payload: dict[str, Any], _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
     current = settings.raw("models")
     current["catalogs"] = payload.get("catalogs", current.get("catalogs", {}))
     settings.update("models", current)
@@ -149,8 +136,9 @@ async def save_model_catalog(payload: dict[str, Any], authorization: str | None 
 
 
 @router.post("/api/upload")
-async def upload_file(file: UploadFile, authorization: str | None = None) -> dict[str, Any]:
-    _check_auth(authorization)
+async def upload_file(
+    file: UploadFile, _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
     content_type = file.content_type or "application/octet-stream"
     data = await file.read()
     try:
@@ -160,8 +148,7 @@ async def upload_file(file: UploadFile, authorization: str | None = None) -> dic
 
 
 @router.get("/api/files/{object_id}")
-async def get_file(object_id: str, authorization: str | None = None) -> Response:
-    _check_auth(authorization)
+async def get_file(object_id: str, _: Annotated[None, Depends(require_auth)]) -> Response:
     data = load_object(object_id)
     if data is None:
         raise HTTPException(status_code=404, detail="文件不存在")
@@ -169,8 +156,7 @@ async def get_file(object_id: str, authorization: str | None = None) -> Response
 
 
 @router.post("/api/run-code")
-async def run_code(payload: dict[str, Any], authorization: str | None = None) -> dict[str, Any]:
-    _check_auth(authorization)
+async def run_code(payload: dict[str, Any], _: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
     code = payload.get("code", "")
     if not code.strip():
         raise HTTPException(status_code=400, detail="代码为空")
@@ -185,8 +171,9 @@ async def run_code(payload: dict[str, Any], authorization: str | None = None) ->
 
 
 @router.post("/api/compress")
-async def manual_compress(payload: dict[str, Any], authorization: str | None = None) -> dict[str, Any]:
-    _check_auth(authorization)
+async def manual_compress(
+    payload: dict[str, Any], _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
     session_id = payload.get("session_id", "")
     messages = sessions.load(session_id)
     if not messages:
@@ -199,36 +186,34 @@ async def manual_compress(payload: dict[str, Any], authorization: str | None = N
 
 
 @router.get("/api/sessions")
-async def list_sessions(authorization: str | None = None) -> dict[str, Any]:
+async def list_sessions(_: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
     return {"sessions": sessions.list_sessions()}
 
 
 @router.post("/api/sessions")
-async def create_session(authorization: str | None = None) -> dict[str, Any]:
+async def create_session(_: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
     session_id = sessions.create()
     return {"id": session_id}
 
 
 @router.get("/api/sessions/{session_id}")
-async def get_session(session_id: str, authorization: str | None = None) -> dict[str, Any]:
+async def get_session(session_id: str, _: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
     return {"id": session_id, "messages": sessions.load(session_id)}
 
 
 @router.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: str, authorization: str | None = None) -> dict[str, Any]:
+async def delete_session(session_id: str, _: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
     sessions.clear(session_id)
     return {"ok": True}
 
 
 @router.post("/api/sessions/{session_id}/archive")
-async def archive_session(session_id: str, authorization: str | None = None) -> dict[str, Any]:
-    path = sessions._path(session_id)
-    if not path.exists():
+async def archive_session(
+    session_id: str, _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
+    dest = sessions.archive(session_id)
+    if dest is None:
         raise HTTPException(status_code=404, detail="会话不存在")
-    archive_dir = sessions.data_dir / "archive"
-    archive_dir.mkdir(exist_ok=True)
-    dest = archive_dir / path.name
-    path.replace(dest)
     return {"ok": True, "archived": dest.name}
 
 
@@ -245,6 +230,32 @@ async def login(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------- WebSocket ----------
+def _record_event(session_id: str, event: dict[str, Any]) -> None:
+    """将 WebSocket 事件同步持久化到会话文件。"""
+    etype = event.get("type")
+    if etype == "assistant_message":
+        sessions.append(session_id, {"role": "assistant", "content": event.get("content", "")})
+    elif etype == "thinking":
+        sessions.append(session_id, {"role": "thinking", "content": event.get("text", "")})
+    elif etype == "tool_call":
+        sessions.append(session_id, {
+            "role": "tool_call",
+            "name": event.get("name"),
+            "arguments": event.get("arguments"),
+            "result": event.get("result"),
+            "status": event.get("status"),
+        })
+    elif etype == "tool":
+        sessions.append(session_id, {
+            "role": "tool",
+            "tool_call_id": event.get("tool_call_id"),
+            "name": event.get("name"),
+            "content": event.get("content"),
+        })
+    elif etype == "delta" and event.get("text"):
+        sessions.append(session_id, {"role": "assistant_delta", "content": event.get("text")})
+
+
 @router.websocket("/api/chat")
 async def chat(ws: WebSocket) -> None:
     await ws.accept()
@@ -268,28 +279,7 @@ async def chat(ws: WebSocket) -> None:
 
     async def sink(event: dict[str, Any]) -> None:
         await ws.send_json(event)
-        etype = event.get("type")
-        if etype == "assistant_message":
-            sessions.append(session_id, {"role": "assistant", "content": event.get("content", "")})
-        elif etype == "thinking":
-            sessions.append(session_id, {"role": "thinking", "content": event.get("text", "")})
-        elif etype == "tool_call":
-            sessions.append(session_id, {
-                "role": "tool_call",
-                "name": event.get("name"),
-                "arguments": event.get("arguments"),
-                "result": event.get("result"),
-                "status": event.get("status"),
-            })
-        elif etype == "tool":
-            sessions.append(session_id, {
-                "role": "tool",
-                "tool_call_id": event.get("tool_call_id"),
-                "name": event.get("name"),
-                "content": event.get("content"),
-            })
-        elif etype == "delta" and event.get("text"):
-            sessions.append(session_id, {"role": "assistant_delta", "content": event.get("text")})
+        _record_event(session_id, event)
 
     try:
         while True:

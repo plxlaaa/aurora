@@ -5,9 +5,10 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 import httpx
@@ -134,13 +135,12 @@ class ModelRegistry:
     def __init__(self, settings) -> None:
         self._settings = settings
         self._clients: dict[str, LLMClient] = {}
+        self._to_close: list[LLMClient] = []
         self.reload()
 
     def reload(self) -> None:
-        """按当前配置重建端点客户端并触发探测（异步探测见 probe_all）。"""
-        for client in self._clients.values():
-            # 不主动关闭复用，避免并发中断；替换引用即可，由 GC 回收
-            pass
+        """按当前配置重建端点客户端；被替换的旧客户端延后至下次探测时关闭。"""
+        retired = list(self._clients.values())
         new_clients: dict[str, LLMClient] = {}
         for name, ep in self._settings.endpoints().items():
             enabled = ep.get("enabled", True)
@@ -158,14 +158,18 @@ class ModelRegistry:
             )
             new_clients[name] = LLMClient(info)
         self._clients = new_clients
+        if retired:
+            self._to_close.extend(retired)
 
     async def probe_all(self) -> None:
-        import asyncio
-
-        async def _probe(name: str, client: LLMClient) -> None:
-            await client.probe()
-
-        await asyncio.gather(*(_probe(n, c) for n, c in self._clients.items()))
+        """先关闭被替换的旧客户端，再并发探测当前端点。"""
+        to_close, self._to_close = self._to_close, []
+        for client in to_close:
+            try:
+                await client.aclose()
+            except Exception:  # noqa: BLE001
+                pass
+        await asyncio.gather(*(client.probe() for client in self._clients.values()))
 
     def get(self, name: str) -> LLMClient | None:
         return self._clients.get(name)

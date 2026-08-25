@@ -97,6 +97,7 @@ cd backend && venv/bin/python -m unittest discover -s tests -v   # 22 项
   - `vision_model_only`：始终使用独立视觉模型
 - 上下文压缩：token 超过 `threshold * context_window` 自动触发，或设置页/API 手动触发；保留系统提示与最近 K 轮原文。
 - 执行环境：`sandbox`（Docker 隔离）默认，`local` 需显式 `allow=true`。
+- 鉴权：设置 `AI_ASSISTANT_API_KEY` 后启用 JWT/API Key 鉴权，除 `/api/health` 与 `/api/auth/login` 外，所有 REST 端点（含会话管理）与 WebSocket 均要求 `Authorization: Bearer <api-key | JWT>`。
 
 ## API 摘要
 

@@ -87,6 +87,26 @@ class SkillsManager:
         self._skills = found
         logger.info("已加载 %d 个 skills: %s", len(found), list(found))
 
+    def set_enabled(self, name: str, enabled: bool) -> bool:
+        """修改 skill 的 enabled 开关并写回 manifest；返回是否找到。"""
+        if not self.skills_dir.exists():
+            return False
+        for manifest_path in sorted(self.skills_dir.glob("*/manifest.yaml")):
+            try:
+                with open(manifest_path, encoding="utf-8") as fh:
+                    manifest = yaml.safe_load(fh) or {}
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("读取 manifest 失败 %s: %s", manifest_path, exc)
+                continue
+            if manifest.get("name") != name:
+                continue
+            manifest["enabled"] = enabled
+            with open(manifest_path, "w", encoding="utf-8") as fh:
+                yaml.safe_dump(manifest, fh, allow_unicode=True, sort_keys=False)
+            self.reload()
+            return True
+        return False
+
     def list(self) -> list[dict[str, Any]]:
         return [
             {"name": s.name, "enabled": s.enabled, "description": s.manifest.get("description", "")}

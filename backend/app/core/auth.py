@@ -5,7 +5,10 @@ Authorization: Bearer <api-key>（Web UI 登录后换取 JWT）。
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import hmac
+import json
 import os
 import time
 import uuid
@@ -18,29 +21,21 @@ JWT_TTL = 24 * 3600
 
 
 def _b64url(data: bytes) -> str:
-    import base64
-
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("utf-8")
 
 
 def _b64url_decode(s: str) -> bytes:
-    import base64
-
     padding = "=" * (-len(s) % 4)
     return base64.urlsafe_b64decode(s + padding)
 
 
 def _sign(payload: str) -> str:
-    import hashlib
-
     msg = payload.encode("utf-8")
     digest = hmac.new(JWT_SECRET.encode("utf-8"), msg, hashlib.sha256).digest()
     return _b64url(digest)
 
 
 def create_jwt(username: str = "user") -> str:
-    import json
-
     header = _b64url(b'{"alg":"HS256","typ":"JWT"}')
     body = _b64url(json.dumps({"sub": username, "iat": int(time.time()), "exp": int(time.time()) + JWT_TTL}).encode("utf-8"))
     payload = f"{header}.{body}"
@@ -48,8 +43,6 @@ def create_jwt(username: str = "user") -> str:
 
 
 def verify_token(token: str) -> dict | None:
-    import json
-
     parts = token.split(".")
     if len(parts) != 3:
         return None

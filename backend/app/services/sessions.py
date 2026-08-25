@@ -35,7 +35,6 @@ class SessionStore:
     def _load_status(self) -> None:
         if self._status_path.exists():
             try:
-                import json
                 with open(self._status_path, "r", encoding="utf-8") as fh:
                     self._status = json.load(fh)
             except Exception:
@@ -43,7 +42,6 @@ class SessionStore:
 
     def _save_status(self) -> None:
         try:
-            import json
             with open(self._status_path, "w", encoding="utf-8") as fh:
                 json.dump(self._status, fh, ensure_ascii=False)
         except Exception:
@@ -109,30 +107,44 @@ class SessionStore:
                 for msg in messages:
                     fh.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
+    def archive(self, session_id: str) -> Path | None:
+        """将会话文件移动到 archive 子目录，返回目标路径；会话不存在时返回 None。"""
+        with self._lock:
+            path = self._path(session_id)
+            if not path.exists():
+                return None
+            archive_dir = self.data_dir / "archive"
+            archive_dir.mkdir(exist_ok=True)
+            dest = archive_dir / path.name
+            path.replace(dest)
+            return dest
+
     def list_sessions(self) -> list[dict[str, Any]]:
         with self._lock:
             sessions = []
             for path in sorted(self.data_dir.glob("*.jsonl")):
-                # 提取首条 user 消息作为标题
+                # 一次遍历同时提取首条 user 消息标题与消息计数
                 title = path.stem
                 preview = ""
+                count = 0
                 with open(path, encoding="utf-8") as fh:
                     for line in fh:
-                        try:
-                            msg = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if msg.get("role") == "user":
-                            content = msg.get("content", "")
-                            if isinstance(content, str) and content.strip():
-                                preview = content.strip()[:50]
-                                break
+                        count += 1
+                        if not preview:
+                            try:
+                                msg = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            if msg.get("role") == "user":
+                                content = msg.get("content", "")
+                                if isinstance(content, str) and content.strip():
+                                    preview = content.strip()[:50]
                 stat = path.stat()
                 sessions.append(
                     {
                         "id": path.stem,
                         "title": preview or title,
-                        "message_count": sum(1 for _ in open(path, encoding="utf-8")),
+                        "message_count": count,
                         "status": self.get_status(path.stem),
                         "created_at": dt.datetime.fromtimestamp(stat.st_ctime, tz=dt.timezone.utc).isoformat(),
                         "updated_at": dt.datetime.fromtimestamp(stat.st_mtime, tz=dt.timezone.utc).isoformat(),
