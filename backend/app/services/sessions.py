@@ -31,6 +31,10 @@ class SessionStore:
         self._status: dict[str, str] = {}
         self._status_path = self.data_dir / "_status.json"
         self._load_status()
+        # Custom session titles: {session_id: title}
+        self._titles: dict[str, str] = {}
+        self._titles_path = self.data_dir / "_titles.json"
+        self._load_titles()
 
     def _load_status(self) -> None:
         if self._status_path.exists():
@@ -46,6 +50,30 @@ class SessionStore:
                 json.dump(self._status, fh, ensure_ascii=False)
         except Exception:
             pass
+
+    def _load_titles(self) -> None:
+        if self._titles_path.exists():
+            try:
+                with open(self._titles_path, "r", encoding="utf-8") as fh:
+                    self._titles = json.load(fh)
+            except Exception:
+                self._titles = {}
+
+    def _save_titles(self) -> None:
+        try:
+            with open(self._titles_path, "w", encoding="utf-8") as fh:
+                json.dump(self._titles, fh, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def rename(self, session_id: str, title: str) -> None:
+        """设置自定义会话标题；传空串则清除自定义标题。"""
+        with self._lock:
+            if title and title.strip():
+                self._titles[session_id] = title.strip()[:80]
+            else:
+                self._titles.pop(session_id, None)
+            self._save_titles()
 
     def set_status(self, session_id: str, status: str) -> None:
         with self._lock:
@@ -143,7 +171,7 @@ class SessionStore:
                 sessions.append(
                     {
                         "id": path.stem,
-                        "title": preview or title,
+                        "title": self._titles.get(path.stem) or preview or title,
                         "message_count": count,
                         "status": self.get_status(path.stem),
                         "created_at": dt.datetime.fromtimestamp(stat.st_ctime, tz=dt.timezone.utc).isoformat(),

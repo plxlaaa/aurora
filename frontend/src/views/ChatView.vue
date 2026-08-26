@@ -1,9 +1,19 @@
 <template>
   <div class="chat-view">
     <div v-if="notice.text" class="notice" :class="notice.type">{{ notice.text }}</div>
+
     <!-- 会话侧栏 -->
     <aside class="sidebar">
       <button class="primary new-btn" @click="createNewSession">＋ 新建会话</button>
+
+      <div class="session-search">
+        <input
+          v-model="sessionQuery"
+          type="text"
+          placeholder="搜索会话…"
+          spellcheck="false"
+        />
+      </div>
 
       <div class="conn-status">
         <span class="dot" :class="{ connected: wsState === 'connected' }"></span>
@@ -12,24 +22,35 @@
 
       <ul class="session-list">
         <li
-          v-for="s in sessions"
+          v-for="s in filteredSessions"
           :key="s.id"
           class="session-item"
           :class="{ active: s.id === currentSessionId }"
-          @click="switchSession(s.id)"
         >
-          <span class="s-name">{{ s.title || '未命名会话' }}</span>
-          <span v-if="s.status === 'running'" class="s-status" title="处理中">◔</span>
-          <button
-            class="s-action"
-            title="归档会话"
-            @click.stop="archive(s.id)"
-          >
-            📦
-          </button>
-          <button class="s-action danger" title="删除会话" @click.stop="remove(s.id)">
-            ✕
-          </button>
+          <template v-if="renamingId === s.id">
+            <input
+              ref="renameInputEl"
+              v-model="renameInput"
+              class="rename-input"
+              spellcheck="false"
+              @click.stop
+              @keyup.enter="confirmRename"
+              @keyup.esc="cancelRename"
+              @blur="confirmRename"
+            />
+          </template>
+          <template v-else>
+            <span class="s-name" :title="s.title" @click="switchSession(s.id)">
+              {{ s.title || '未命名会话' }}
+            </span>
+            <span v-if="s.status === 'running'" class="s-status" title="处理中">◔</span>
+            <button class="s-action" title="重命名" @click.stop="startRename(s)">✎</button>
+            <button class="s-action" title="归档会话" @click.stop="archive(s.id)">⇱</button>
+            <button class="s-action danger" title="删除会话" @click.stop="remove(s.id)">✕</button>
+          </template>
+        </li>
+        <li v-if="!filteredSessions.length" class="no-result">
+          {{ sessionQuery ? '无匹配会话' : '暂无会话' }}
         </li>
       </ul>
 
@@ -72,8 +93,19 @@
       <!-- 消息流 -->
       <div ref="scroller" class="messages">
         <div v-if="!messages.length" class="empty">
-          <p>在下方输入内容开始对话，可附带图片。</p>
+          <div class="empty-icon">✦</div>
+          <p class="empty-title">{{ currentSessionTitle || '开始一段新对话' }}</p>
           <p class="hint">支持视觉理解、上下文压缩、Skills 与 MCP 工具。</p>
+          <div class="suggestions">
+            <button
+              v-for="s in suggestions"
+              :key="s"
+              class="suggestion"
+              @click="useSuggestion(s)"
+            >
+              {{ s }}
+            </button>
+          </div>
         </div>
 
         <MessageItem
@@ -81,6 +113,8 @@
           :key="m.id"
           :message="m"
           :streaming="streaming && m.id === lastMessageId"
+          :regenerable="regenerableOf(m)"
+          @regenerate="regenerate"
         />
       </div>
 
@@ -118,11 +152,20 @@
             @input="autoGrow"
           ></textarea>
           <button
+            v-if="streaming"
+            class="stop-btn"
+            title="停止生成"
+            @click="stop"
+          >
+            ■ 停止
+          </button>
+          <button
+            v-else
             class="primary send-btn"
-            :disabled="streaming || (!input.trim() && !pendingAttachments.length)"
+            :disabled="!input.trim() && !pendingAttachments.length"
             @click="send"
           >
-            {{ streaming ? '生成中…' : '发送' }}
+            发送
           </button>
         </div>
       </div>
@@ -138,6 +181,7 @@ import {
   getSession,
   deleteSession,
   archiveSession,
+  renameSession,
   uploadImage,
   triggerCompress,
   getModels,
@@ -145,6 +189,12 @@ import {
 } from '../api'
 import { getToken } from '../api/http'
 import MessageItem from '../components/MessageItem.vue'
+
+const suggestions = [
+  '用通俗的语言解释什么是大语言模型',
+  '写一段 Python 快速排序代码',
+  '帮我总结三篇经典科幻小说的共同点'
+]
 
 const messages = ref([])
 const sessions = ref([])
@@ -156,9 +206,13 @@ const wsState = ref('disconnected')
 const currentModel = ref('')
 const thinkingLevel = ref('normal')
 const currentModelOptions = ref([])
+const sessionQuery = ref('')
+const renamingId = ref(null)
+const renameInput = ref('')
 
 const fileInput = ref(null)
 const scroller = ref(null)
+const renameInputEl = ref(null)
 
 let socket = null
 let msgSeq = 0
@@ -169,6 +223,17 @@ let reconnectTimer = null
 const lastMessageId = computed(() =>
   messages.value.length ? messages.value[messages.value.length - 1].id : null
 )
+
+const currentSessionTitle = computed(() => {
+  const s = sessions.value.find((x) => x.id === currentSessionId.value)
+  return s?.title || ''
+})
+
+const filteredSessions = computed(() => {
+  const q = sessionQuery.value.trim().toLowerCase()
+  if (!q) return sessions.value
+  return sessions.value.filter((s) => (s.title || '').toLowerCase().includes(q))
+})
 
 const wsText = computed(() => {
   if (wsState.value === 'connected') return '已连接'
@@ -187,7 +252,7 @@ function nextId() {
   return `m-${msgSeq}`
 }
 
-function scrollToBottom() {
+function scrollToBottom(force = false) {
   nextTick(() => {
     if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
   })
@@ -197,6 +262,14 @@ function autoGrow(e) {
   const el = e.target
   el.style.height = 'auto'
   el.style.height = Math.min(el.scrollHeight, 140) + 'px'
+}
+
+function useSuggestion(text) {
+  input.value = text
+  nextTick(() => {
+    const ta = document.querySelector('.input-area')
+    if (ta) ta.focus()
+  })
 }
 
 /* ---------- 历史消息归一化 ---------- */
@@ -382,6 +455,33 @@ function upsertToolResult(data) {
   }
 }
 
+/* ---------- 停止 / 重新生成 ---------- */
+function stop() {
+  streaming.value = false
+  closeSocket()
+}
+
+function regenerableOf(m) {
+  if (m.role !== 'assistant' || streaming.value) return false
+  return m.id === lastMessageId.value
+}
+
+async function regenerate() {
+  if (!currentSessionId.value || streaming.value) return
+  let lastUserIdx = -1
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    if (messages.value[i].role === 'user') {
+      lastUserIdx = i
+      break
+    }
+  }
+  if (lastUserIdx < 0) return
+  messages.value.splice(lastUserIdx + 1)
+  streaming.value = true
+  ensureSocketAndSend({ type: 'regenerate' })
+  scrollToBottom()
+}
+
 /* ---------- 会话管理 ---------- */
 async function loadSessions() {
   try {
@@ -445,6 +545,31 @@ async function archive(id) {
   } catch (e) {
     notify('归档失败：' + e.message, 'error')
   }
+}
+
+async function startRename(s) {
+  renamingId.value = s.id
+  renameInput.value = s.title || ''
+  await nextTick()
+  renameInputEl.value?.focus()
+  renameInputEl.value?.select()
+}
+
+async function confirmRename() {
+  if (!renamingId.value) return
+  const id = renamingId.value
+  renamingId.value = null
+  const title = renameInput.value.trim()
+  try {
+    await renameSession(id, title)
+    await loadSessions()
+  } catch (e) {
+    notify('重命名失败：' + e.message, 'error')
+  }
+}
+
+function cancelRename() {
+  renamingId.value = null
 }
 
 async function compressNow() {
@@ -564,7 +689,7 @@ function notify(text, type = 'ok') {
   }, 3000)
 }
 
-watch(messages, scrollToBottom, { deep: true })
+watch(messages, () => scrollToBottom(), { deep: true })
 
 onMounted(async () => {
   await Promise.all([loadSessions(), loadModelsMeta()])
@@ -599,7 +724,7 @@ onUnmounted(() => {
   border-radius: 8px;
   padding: 6px 14px;
   font-size: 13px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 2px 8px var(--shadow);
 }
 
 .notice.ok {
@@ -614,7 +739,7 @@ onUnmounted(() => {
 
 /* 侧栏 */
 .sidebar {
-  width: 260px;
+  width: 268px;
   flex: 0 0 auto;
   border-right: 1px solid var(--border);
   background: var(--bg);
@@ -628,19 +753,27 @@ onUnmounted(() => {
   width: 100%;
 }
 
+.session-search input {
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12px;
+  border-radius: 8px;
+}
+
 .conn-status {
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 12px;
   color: var(--text-weak);
+  padding: 0 2px;
 }
 
 .dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #c6ccd2;
+  background: var(--text-faint);
 }
 
 .dot.connected {
@@ -661,9 +794,9 @@ onUnmounted(() => {
 .session-item {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 8px 10px;
-  border-radius: 6px;
+  gap: 2px;
+  padding: 7px 8px;
+  border-radius: 8px;
   cursor: pointer;
   border: 1px solid transparent;
   color: var(--text);
@@ -701,19 +834,41 @@ onUnmounted(() => {
 .s-action {
   border: none;
   background: transparent;
-  color: var(--text-weak);
+  color: var(--text-faint);
   padding: 0 3px;
   font-size: 12px;
   flex: 0 0 auto;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.session-item:hover .s-action {
+  opacity: 1;
 }
 
 .s-action:hover {
-  color: var(--warn);
+  color: var(--accent);
   background: transparent;
 }
 
 .s-action.danger:hover {
   color: var(--err);
+}
+
+.rename-input {
+  flex: 1 1 auto;
+  font-size: 13px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  min-width: 0;
+}
+
+.no-result {
+  padding: 12px;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 12px;
+  list-style: none;
 }
 
 .compress-btn {
@@ -776,15 +931,37 @@ onUnmounted(() => {
   padding: 20px 24px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 
 .empty {
   align-self: center;
-  margin-top: 60px;
+  margin-top: 40px;
   text-align: center;
   color: var(--text-weak);
   font-size: 13px;
+  max-width: 480px;
+}
+
+.empty-icon {
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 26px;
+  color: #fff;
+  border-radius: 16px;
+  background: var(--gradient);
+  box-shadow: 0 6px 20px rgba(74, 125, 255, 0.35);
+}
+
+.empty-title {
+  margin: 6px 0 4px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
 }
 
 .empty p {
@@ -792,8 +969,31 @@ onUnmounted(() => {
 }
 
 .empty .hint {
-  color: #aab2ba;
+  color: var(--text-faint);
   font-size: 12px;
+}
+
+.suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.suggestion {
+  font-size: 13px;
+  text-align: left;
+  padding: 9px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text);
+}
+
+.suggestion:hover {
+  border-color: var(--accent);
+  background: var(--accent-weak);
+  color: var(--accent);
 }
 
 .composer {
@@ -820,7 +1020,7 @@ onUnmounted(() => {
   width: 64px;
   height: 64px;
   object-fit: cover;
-  border-radius: 6px;
+  border-radius: 8px;
   border: 1px solid var(--border);
 }
 
@@ -849,7 +1049,7 @@ onUnmounted(() => {
   width: 32px;
   height: 32px;
   padding: 0;
-  border-radius: 6px;
+  border-radius: 8px;
   font-size: 16px;
   line-height: 1;
 }
@@ -865,5 +1065,40 @@ onUnmounted(() => {
 
 .send-btn {
   flex: 0 0 auto;
+}
+
+.stop-btn {
+  flex: 0 0 auto;
+  background: var(--err-bg);
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.stop-btn:hover {
+  background: var(--err);
+  color: #fff;
+}
+
+/* 移动端适配 */
+@media (max-width: 720px) {
+  .sidebar {
+    width: 220px;
+  }
+
+  .s-action {
+    opacity: 1;
+  }
+
+  .tool-item {
+    gap: 4px;
+  }
+
+  .tool-item select {
+    max-width: 120px;
+  }
+
+  .messages {
+    padding: 14px;
+  }
 }
 </style>

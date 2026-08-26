@@ -231,6 +231,19 @@ async def archive_session(
     return {"ok": True, "archived": dest.name}
 
 
+@router.post("/api/sessions/{session_id}/rename")
+async def rename_session(
+    session_id: str,
+    payload: dict[str, Any],
+    _: Annotated[None, Depends(require_auth)],
+) -> dict[str, Any]:
+    try:
+        sessions.rename(session_id, payload.get("title", ""))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {"ok": True, "title": sessions.list_sessions()}
+
+
 @router.post("/api/auth/login")
 async def login(payload: dict[str, Any]) -> dict[str, Any]:
     if not auth.auth_enabled():
@@ -244,6 +257,22 @@ async def login(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------- WebSocket ----------
+def _resolve_attachments(attachments: list[Any]) -> list[dict[str, Any]]:
+    """将附件引用解析为可送入视觉路由的 image 结构（仅接受图片）。"""
+    import base64
+
+    resolved = []
+    for att in attachments:
+        if isinstance(att, str):
+            data = load_object(att)
+            if data is None:
+                continue
+            resolved.append({"type": "image", "object_id": att, "base64": base64.b64encode(data).decode("utf-8")})
+        elif isinstance(att, dict) and att.get("type") == "image":
+            resolved.append(att)
+    return resolved
+
+
 def _record_event(session_id: str, event: dict[str, Any]) -> None:
     """将 WebSocket 事件同步持久化到会话文件。"""
     etype = event.get("type")
@@ -335,18 +364,35 @@ async def chat(ws: WebSocket) -> None:
                 sessions.save(session_id, history)
                 continue
 
+            # 重新生成上一条回复：删除最后一个 user 消息之后的全部内容并重新推理
+            if msg_type == "regenerate":
+                history = sessions.load(session_id)
+                idx = None
+                for i in range(len(history) - 1, -1, -1):
+                    if history[i].get("role") == "user":
+                        idx = i
+                        break
+                if idx is None:
+                    await ws.send_json({"type": "error", "message": "没有可重新生成的消息"})
+                    continue
+                del history[idx + 1 :]
+                sessions.save(session_id, history)
+                last_user = history[idx]
+                resolved = _resolve_attachments(last_user.get("attachments", []))
+                sessions.mark_running(session_id)
+                try:
+                    await pipeline.run_full(history, resolved, sink, force_compress=False)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("重新生成失败")
+                    await ws.send_json({"type": "error", "message": str(exc)})
+                finally:
+                    sessions.mark_completed(session_id)
+                continue
+
             content = msg.get("content", "")
             attachments = msg.get("attachments", [])
             # 仅接受图片附件；object_id 引用已在网关侧解析
-            resolved = []
-            for att in attachments:
-                if isinstance(att, str):
-                    data = load_object(att)
-                    if data is None:
-                        continue
-                    resolved.append({"type": "image", "object_id": att, "base64": __import__("base64").b64encode(data).decode("utf-8")})
-                elif isinstance(att, dict) and att.get("type") == "image":
-                    resolved.append(att)
+            resolved = _resolve_attachments(attachments)
 
             # 加载历史，追加本轮 user 消息
             history = sessions.load(session_id)

@@ -44,6 +44,8 @@ export const getSession = (id) => http.get(base(`/sessions/${encodeURIComponent(
 export const deleteSession = (id) => http.del(base(`/sessions/${encodeURIComponent(id)}`))
 export const archiveSession = (id) =>
   http.post(base(`/sessions/${encodeURIComponent(id)}/archive`))
+export const renameSession = (id, title) =>
+  http.post(base(`/sessions/${encodeURIComponent(id)}/rename`), { title })
 
 export default {
   login,
@@ -64,5 +66,6 @@ export default {
   createSession,
   getSession,
   deleteSession,
-  archiveSession
+  archiveSession,
+  renameSession
 }

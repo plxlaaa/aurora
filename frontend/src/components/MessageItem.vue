@@ -2,58 +2,76 @@
   <div class="msg" :class="'role-' + message.role">
     <!-- 用户消息 -->
     <template v-if="message.role === 'user'">
-      <div class="user-msg">
-        <div v-if="message.attachments && message.attachments.length" class="att-thumbs">
-          <a
-            v-for="(a, i) in message.attachments"
-            :key="i"
-            :href="a.object_id ? fileUrl(a.object_id) : undefined"
-            target="_blank"
-            rel="noopener"
-          >
-            <img
-              :src="a.object_id ? fileUrl(a.object_id) : a.preview"
-              class="att-thumb"
-              alt="附件"
-            />
-          </a>
+      <div class="row user-row">
+        <div class="body-col">
+          <div v-if="message.attachments && message.attachments.length" class="att-thumbs">
+            <a
+              v-for="(a, i) in message.attachments"
+              :key="i"
+              :href="a.object_id ? fileUrl(a.object_id) : undefined"
+              target="_blank"
+              rel="noopener"
+            >
+              <img
+                :src="a.object_id ? fileUrl(a.object_id) : a.preview"
+                class="att-thumb"
+                alt="附件"
+              />
+            </a>
+          </div>
+          <div v-if="message.content" class="bubble user-bubble">{{ message.content }}</div>
         </div>
-        <div v-if="message.content" class="bubble user-bubble">
-          {{ message.content }}
-        </div>
+        <span class="avatar user-avatar">我</span>
       </div>
     </template>
 
-    <!-- 思考过程 -->
+    <!-- 思考过程（可折叠） -->
     <template v-else-if="message.role === 'thinking'">
-      <div class="bubble thinking-bubble">
-        <span class="tag">思考</span>
-        <span class="thinking-text">{{ message.content || '…' }}</span>
+      <div class="row">
+        <span class="avatar ai-avatar">AI</span>
+        <div class="body-col">
+          <div class="thinking-bubble" @click="showThinking = !showThinking">
+            <span class="tag">思考</span>
+            <span class="chev">{{ showThinking ? '▾' : '▸' }}</span>
+            <span v-if="!showThinking" class="thinking-preview">{{ preview }}</span>
+          </div>
+          <div v-if="showThinking" class="thinking-body">{{ message.content }}</div>
+        </div>
       </div>
     </template>
 
     <!-- 工具调用状态 -->
     <template v-else-if="message.role === 'tool_call'">
-      <div class="status-row">
-        <span class="state" :class="message.status">
-          {{ stateSymbol(message.status) }}
-        </span>
-        <span class="s-tool">{{ message.name || '工具' }}</span>
-        <span v-if="message.status === 'running'" class="state-text running">运行中</span>
-        <span v-else class="state-text" :class="message.status">
-          {{ message.status === 'done' ? '完成' : message.status === 'error' ? '失败' : '待处理' }}
-        </span>
-      </div>
-      <div v-if="hasResult" class="tool-result">
-        <pre class="tool-result-body">{{ resultText }}</pre>
+      <div class="row tool-row">
+        <span class="avatar tool-avatar">⚙</span>
+        <div class="body-col">
+          <div class="status-row">
+            <span class="state" :class="message.status">
+              {{ stateSymbol(message.status) }}
+            </span>
+            <span class="s-tool">{{ message.name || '工具' }}</span>
+            <span v-if="message.status === 'running'" class="state-text running">运行中</span>
+            <span v-else class="state-text" :class="message.status">
+              {{ message.status === 'done' ? '完成' : message.status === 'error' ? '失败' : '待处理' }}
+            </span>
+          </div>
+          <div v-if="hasResult" class="tool-result">
+            <pre class="tool-result-body">{{ resultText }}</pre>
+          </div>
+        </div>
       </div>
     </template>
 
     <!-- 工具结果 -->
     <template v-else-if="message.role === 'tool'">
-      <div class="status-row tool-result-row">
-        <span class="s-tool">{{ message.name || '工具结果' }}</span>
-        <span v-if="message.content" class="s-detail">{{ trimResult(message.content) }}</span>
+      <div class="row tool-row">
+        <span class="avatar tool-avatar">⚙</span>
+        <div class="body-col">
+          <div class="status-row tool-result-row">
+            <span class="s-tool">{{ message.name || '工具结果' }}</span>
+            <span v-if="message.content" class="s-detail">{{ trimResult(message.content) }}</span>
+          </div>
+        </div>
       </div>
     </template>
 
@@ -67,24 +85,65 @@
       <div class="info-row error">[错误] {{ message.content }}</div>
     </template>
 
-    <!-- 助手消息（含流式光标） -->
+    <!-- 助手消息 -->
     <template v-else>
-      <div class="bubble assistant-bubble">
-        <span v-if="streaming" class="cursor">▍</span>
-        <span class="content">{{ message.content || '' }}</span>
+      <div class="row">
+        <span class="avatar ai-avatar">AI</span>
+        <div class="body-col">
+          <div class="bubble assistant-bubble">
+            <MarkdownText :text="message.content" :streaming="streaming" />
+            <span v-if="streaming" class="cursor">▍</span>
+          </div>
+          <!-- 消息操作 -->
+          <div class="msg-actions">
+            <button class="action-btn" title="复制" @click="copyMessage">📋</button>
+            <button
+              class="action-btn"
+              :class="{ active: feedback === 'up' }"
+              title="有帮助"
+              @click="setFeedback('up')"
+            >
+              ▲
+            </button>
+            <button
+              class="action-btn"
+              :class="{ active: feedback === 'down' }"
+              title="没帮助"
+              @click="setFeedback('down')"
+            >
+              ▼
+            </button>
+            <button
+              v-if="regenerable"
+              class="action-btn"
+              title="重新生成"
+              :disabled="streaming"
+              @click="$emit('regenerate')"
+            >
+              ↻
+            </button>
+          </div>
+        </div>
       </div>
     </template>
   </div>
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { fileUrl } from '../api'
+import MarkdownText from './MarkdownText.vue'
 
 const props = defineProps({
   message: { type: Object, required: true },
-  streaming: { type: Boolean, default: false }
+  streaming: { type: Boolean, default: false },
+  regenerable: { type: Boolean, default: false }
 })
+
+defineEmits(['regenerate'])
+
+const showThinking = ref(true)
+const feedback = ref('')
 
 function stateSymbol(status) {
   if (status === 'done' || status === 'ok' || status === 'success') return '✓'
@@ -92,6 +151,11 @@ function stateSymbol(status) {
   if (status === 'running' || status === 'streaming') return '◔'
   return '○'
 }
+
+const preview = computed(() => {
+  const t = props.message.content || ''
+  return t.length > 60 ? t.slice(0, 60) + '…' : t
+})
 
 const hasResult = computed(() => {
   const r = props.message.result
@@ -112,21 +176,89 @@ function trimResult(text) {
   const s = String(text || '')
   return s.length > 120 ? s.slice(0, 120) + '…' : s
 }
+
+async function copyMessage() {
+  const text = props.message.content || ''
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    /* ignore */
+  }
+}
+
+function setFeedback(v) {
+  feedback.value = feedback.value === v ? '' : v
+}
 </script>
 
 <style scoped>
 .msg {
   max-width: 100%;
+  animation: msg-in 0.25s ease;
 }
 
-/* 用户消息 */
-.user-msg {
+@keyframes msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.user-row {
+  flex-direction: row-reverse;
+}
+
+.avatar {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  user-select: none;
+  box-shadow: 0 1px 4px var(--shadow);
+}
+
+.ai-avatar {
+  background: var(--gradient);
+}
+
+.user-avatar {
+  background: #10b981;
+}
+
+.tool-avatar {
+  background: var(--warn);
+  font-size: 14px;
+}
+
+.body-col {
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
-  gap: 6px;
+  gap: 5px;
+  min-width: 0;
+  max-width: 78%;
 }
 
+.user-row .body-col {
+  align-items: flex-end;
+}
+
+/* 附件 */
 .att-thumbs {
   display: flex;
   gap: 8px;
@@ -137,45 +269,79 @@ function trimResult(text) {
   width: 64px;
   height: 64px;
   object-fit: cover;
-  border-radius: 6px;
+  border-radius: 8px;
   border: 1px solid var(--border);
 }
 
+/* 气泡 */
 .bubble {
-  border-radius: 10px;
-  padding: 9px 13px;
-  max-width: 78%;
+  border-radius: 12px;
+  padding: 10px 14px;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
 .user-bubble {
-  background: var(--accent);
+  background: var(--gradient);
   color: #fff;
+  border-radius: 12px 12px 2px 12px;
 }
 
 .assistant-bubble {
-  background: var(--bg);
+  background: var(--bg-panel);
   border: 1px solid var(--border);
+  border-radius: 12px 12px 12px 2px;
+  box-shadow: 0 1px 2px var(--shadow);
+  min-width: 40px;
 }
 
+/* 思考 */
 .thinking-bubble {
-  background: var(--accent-weak);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
   color: var(--text-weak);
-  font-size: 13px;
-  border-left: 3px solid var(--accent);
-  border-radius: 4px;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.thinking-bubble:hover {
+  border-color: var(--accent);
 }
 
 .tag {
   font-weight: 600;
-  margin-right: 6px;
+  color: var(--accent);
 }
 
-.thinking-text {
-  color: var(--text);
+.chev {
+  color: var(--text-faint);
 }
 
+.thinking-preview {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thinking-body {
+  background: var(--bg-soft);
+  border-left: 3px solid var(--accent);
+  border-radius: 4px;
+  padding: 8px 12px;
+  color: var(--text-weak);
+  font-size: 12.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: 100%;
+}
+
+/* 光标 */
 .cursor {
   color: var(--accent);
   animation: blink 1s steps(1) infinite;
@@ -187,12 +353,49 @@ function trimResult(text) {
   }
 }
 
-/* 状态行 */
+/* 消息操作 */
+.msg-actions {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.body-col:hover .msg-actions {
+  opacity: 1;
+}
+
+.action-btn {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-faint);
+}
+
+.action-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.action-btn.active {
+  color: var(--accent);
+  background: var(--accent-weak);
+  border-color: var(--accent);
+}
+
+/* 工具状态 */
 .status-row {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  background: var(--bg);
+  background: var(--bg-soft);
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 6px 12px;
@@ -251,7 +454,7 @@ function trimResult(text) {
 }
 
 .tool-result {
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
 .tool-result-body {
@@ -259,9 +462,9 @@ function trimResult(text) {
   max-width: 100%;
   max-height: 240px;
   overflow: auto;
-  background: var(--bg);
+  background: var(--bg-code);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 8px 10px;
   font-size: 12px;
   white-space: pre-wrap;
@@ -273,14 +476,29 @@ function trimResult(text) {
   text-align: center;
   color: var(--text-weak);
   font-size: 12px;
-  background: var(--bg);
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
   border-radius: 10px;
   padding: 4px 12px;
   display: inline-block;
+  margin: 0 auto;
+  width: fit-content;
 }
 
 .info-row.error {
   color: var(--err);
-  background: #fdefeb;
+  background: var(--err-bg);
+  border-color: var(--err);
+}
+
+/* 移动端适配 */
+@media (max-width: 720px) {
+  .body-col {
+    max-width: 100%;
+  }
+
+  .msg-actions {
+    opacity: 1;
+  }
 }
 </style>

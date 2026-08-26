@@ -85,13 +85,23 @@ onMounted(async () => {
   background: var(--bg);
 }
 
+.login-view::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: var(--gradient);
+  opacity: 0.06;
+  pointer-events: none;
+}
+
 .login-card {
   width: 360px;
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 32px 28px;
+  border-radius: 16px;
+  padding: 36px 30px;
   text-align: center;
+  box-shadow: 0 8px 32px var(--shadow-lg);
 }
 
 .title {

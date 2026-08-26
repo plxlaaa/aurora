@@ -1,15 +1,57 @@
 :root {
-  --bg: #f7f8f9;
+  /* 浅色主题（默认） */
+  --bg: #f4f6f9;
   --bg-panel: #ffffff;
-  --bg-hover: #eef0f2;
-  --text: #3a3f45;
-  --text-weak: #7a828b;
-  --border: #e2e5e8;
+  --bg-hover: #eef1f5;
+  --bg-soft: #f2f4f8;
+  --bg-code: #f6f8fa;
+  --text: #1f2430;
+  --text-weak: #6b7280;
+  --text-faint: #9aa3af;
+  --border: #e3e7ee;
   --accent: #4a7dff;
-  --accent-weak: #eef3ff;
-  --ok: #37a95b;
-  --warn: #c98a1f;
-  --err: #c8503b;
+  --accent-hover: #3c6ce0;
+  --accent-weak: #eaf0ff;
+  --ok: #16a34a;
+  --ok-bg: #eafaf0;
+  --warn: #d97706;
+  --warn-bg: #fef4e4;
+  --err: #dc2626;
+  --err-bg: #fdecea;
+  --scroll-thumb: #c9d2dc;
+  --scroll-thumb-hover: #aeb9c6;
+  --shadow: rgba(15, 23, 42, 0.08);
+  --shadow-lg: rgba(15, 23, 42, 0.14);
+  --gradient: linear-gradient(135deg, #4a7dff 0%, #8b5cf6 100%);
+  color-scheme: light;
+}
+
+html[data-theme="dark"] {
+  /* 深色主题 */
+  --bg: #0f1218;
+  --bg-panel: #171b24;
+  --bg-hover: #212734;
+  --bg-soft: #1d222d;
+  --bg-code: #141922;
+  --text: #e6e9ef;
+  --text-weak: #9aa3b2;
+  --text-faint: #6b7484;
+  --border: #2a3140;
+  --accent: #5b8cff;
+  --accent-hover: #6f9aff;
+  --accent-weak: #1e2a4a;
+  --ok: #34d399;
+  --ok-bg: #0e2b22;
+  --warn: #fbbf24;
+  --warn-bg: #33260e;
+  --err: #f87171;
+  --err-bg: #3a1a1c;
+  --scroll-thumb: #333c4e;
+  --scroll-thumb-hover: #414b60;
+  --shadow: rgba(0, 0, 0, 0.35);
+  --shadow-lg: rgba(0, 0, 0, 0.5);
+  --gradient: linear-gradient(135deg, #5b8cff 0%, #a78bfa 100%);
+  color-scheme: dark;
 }
 
 * {
@@ -31,6 +73,7 @@ body {
   font-size: 14px;
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
+  transition: background-color 0.25s ease, color 0.25s ease;
 }
 
 button {
@@ -40,9 +83,10 @@ button {
   border: 1px solid var(--border);
   background: var(--bg-panel);
   color: var(--text);
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 6px 12px;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease,
+    transform 0.1s ease, box-shadow 0.15s ease;
 }
 
 button:hover {
@@ -54,14 +98,24 @@ button:disabled {
   cursor: not-allowed;
 }
 
+button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
 button.primary {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--gradient);
+  border: none;
   color: #fff;
+  box-shadow: 0 2px 8px rgba(74, 125, 255, 0.35);
 }
 
 button.primary:hover {
-  background: #3c6ce0;
+  background: var(--gradient);
+  filter: brightness(1.08);
+}
+
+button.primary:disabled {
+  box-shadow: none;
 }
 
 button.danger {
@@ -84,15 +138,17 @@ textarea {
   color: var(--text);
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 7px 10px;
   outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.25s ease;
 }
 
 input:focus,
 select:focus,
 textarea:focus {
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-weak);
 }
 
 a {
@@ -106,20 +162,21 @@ a {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #d4d9de;
+  background: var(--scroll-thumb);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #bfc6cc;
+  background: var(--scroll-thumb-hover);
 }
 
 /* 通用卡片与面板 */
 .card {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
   padding: 18px;
+  box-shadow: 0 1px 3px var(--shadow);
 }
 
 .card-title {
@@ -144,19 +201,19 @@ a {
 .badge.ok {
   color: var(--ok);
   border-color: var(--ok);
-  background: #eefaf1;
+  background: var(--ok-bg);
 }
 
 .badge.warn {
   color: var(--warn);
   border-color: var(--warn);
-  background: #fdf6e8;
+  background: var(--warn-bg);
 }
 
 .badge.err {
   color: var(--err);
   border-color: var(--err);
-  background: #fdefeb;
+  background: var(--err-bg);
 }
 
 .badge.na {
