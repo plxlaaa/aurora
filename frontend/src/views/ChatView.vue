@@ -3,7 +3,7 @@
     <div v-if="notice.text" class="notice" :class="notice.type">{{ notice.text }}</div>
 
     <!-- 会话侧栏 -->
-    <aside class="sidebar">
+    <aside class="sidebar" :class="{ collapsed: sidebarCollapsed }">
       <button class="primary new-btn" @click="createNewSession">＋ 新建会话</button>
 
       <div class="session-search">
@@ -67,6 +67,9 @@
     <section class="main">
       <!-- 工具栏：模型 / 思考强度 / 连接 -->
       <div class="chat-toolbar">
+        <button class="toggle-side" :title="sidebarCollapsed ? '展开会话栏' : '收起会话栏'" @click="sidebarCollapsed = !sidebarCollapsed">
+          {{ sidebarCollapsed ? '☰' : '⟨' }}
+        </button>
         <label class="tool-item">
           <span>模型</span>
           <select v-model="currentModel" :disabled="!currentModelOptions.length" @change="onSwitchModel">
@@ -91,7 +94,7 @@
       </div>
 
       <!-- 消息流 -->
-      <div ref="scroller" class="messages">
+      <div ref="scroller" class="messages" @scroll.passive="onScroll">
         <div v-if="!messages.length" class="empty">
           <div class="empty-icon">✦</div>
           <p class="empty-title">{{ currentSessionTitle || '开始一段新对话' }}</p>
@@ -120,6 +123,10 @@
 
       <!-- 输入区 -->
       <div class="composer">
+        <button v-if="!atBottom" class="to-bottom" title="回到底部" @click="scrollToBottom(true)">
+          ↓ 回到最新
+        </button>
+
         <div v-if="pendingAttachments.length" class="pending-att">
           <div v-for="(a, i) in pendingAttachments" :key="i" class="pending-thumb-wrap">
             <img :src="a.preview" class="att-thumb" alt="待发送" />
@@ -130,25 +137,30 @@
         <div class="composer-row">
           <button
             class="attach-btn"
-            :disabled="streaming"
+            :disabled="uploading"
             title="添加图片"
             @click="pickImage"
           >
-            ＋
+            {{ uploading ? '…' : '＋' }}
           </button>
           <input
             type="file"
             ref="fileInput"
             accept="image/*"
+            multiple
             hidden
             @change="onFileChange"
           />
           <textarea
+            ref="inputEl"
             v-model="input"
             class="input-area"
             rows="1"
-            placeholder="输入消息，回车发送"
-            @keydown.enter.exact.prevent="send"
+            :placeholder="streaming ? '生成中，可继续输入…' : '输入消息，回车发送，Shift+回车换行'"
+            @keydown="onKeydown"
+            @compositionstart="composing = true"
+            @compositionend="composing = false"
+            @paste="onPaste"
             @input="autoGrow"
           ></textarea>
           <button
@@ -162,7 +174,7 @@
           <button
             v-else
             class="primary send-btn"
-            :disabled="!input.trim() && !pendingAttachments.length"
+            :disabled="!canSend"
             @click="send"
           >
             发送
@@ -184,8 +196,7 @@ import {
   renameSession,
   uploadImage,
   triggerCompress,
-  getModels,
-  fileUrl
+  getModels
 } from '../api'
 import { getToken } from '../api/http'
 import MessageItem from '../components/MessageItem.vue'
@@ -202,6 +213,7 @@ const currentSessionId = ref(null)
 const input = ref('')
 const pendingAttachments = ref([])
 const streaming = ref(false)
+const uploading = ref(false)
 const wsState = ref('disconnected')
 const currentModel = ref('')
 const thinkingLevel = ref('normal')
@@ -209,19 +221,30 @@ const currentModelOptions = ref([])
 const sessionQuery = ref('')
 const renamingId = ref(null)
 const renameInput = ref('')
+const sidebarCollapsed = ref(false)
+const atBottom = ref(true)
+const composing = ref(false)
 
 const fileInput = ref(null)
 const scroller = ref(null)
 const renameInputEl = ref(null)
+const inputEl = ref(null)
 
 let socket = null
 let msgSeq = 0
 let socketSessionId = null
 let manualClose = false
 let reconnectTimer = null
+let reconnectDelay = 1000
+// 连接尚未就绪时暂存的待发送指令
+let outbox = []
 
 const lastMessageId = computed(() =>
   messages.value.length ? messages.value[messages.value.length - 1].id : null
+)
+
+const canSend = computed(
+  () => !uploading.value && (!!input.value.trim() || pendingAttachments.value.length > 0)
 )
 
 const currentSessionTitle = computed(() => {
@@ -244,7 +267,7 @@ const wsText = computed(() => {
 const wsUrl = computed(() => {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   const token = getToken()
-  return `${proto}://${location.host}/api/chat?token=${encodeURIComponent(token)}`
+  return `${proto}://${location.host}/api/chat?token=${encodeURIComponent(token || '')}`
 })
 
 function nextId() {
@@ -252,23 +275,43 @@ function nextId() {
   return `m-${msgSeq}`
 }
 
+/* 距底部 80px 内视为「贴底」，超出则不再自动滚动，避免打断用户回看 */
+function onScroll() {
+  const el = scroller.value
+  if (!el) return
+  atBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+}
+
 function scrollToBottom(force = false) {
+  if (!force && !atBottom.value) return
   nextTick(() => {
-    if (scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
+    const el = scroller.value
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+    atBottom.value = true
   })
 }
 
-function autoGrow(e) {
-  const el = e.target
+function autoGrow() {
+  const el = inputEl.value
+  if (!el) return
   el.style.height = 'auto'
   el.style.height = Math.min(el.scrollHeight, 140) + 'px'
+}
+
+/* 回车发送：输入法组合中与 Shift/Ctrl 组合键不触发 */
+function onKeydown(e) {
+  if (e.key !== 'Enter') return
+  if (composing.value || e.isComposing || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return
+  e.preventDefault()
+  send()
 }
 
 function useSuggestion(text) {
   input.value = text
   nextTick(() => {
-    const ta = document.querySelector('.input-area')
-    if (ta) ta.focus()
+    inputEl.value?.focus()
+    autoGrow()
   })
 }
 
@@ -309,7 +352,10 @@ function normalizeHistory(raw) {
 
 /* ---------- WebSocket ---------- */
 function connectWS(sessionId) {
-  if (socket && socket.readyState === WebSocket.OPEN && socketSessionId === sessionId) return
+  if (socket && socketSessionId === sessionId &&
+      (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+    return
+  }
   closeSocket()
   manualClose = false
   socketSessionId = sessionId
@@ -317,16 +363,24 @@ function connectWS(sessionId) {
   socket = new WebSocket(`${wsUrl.value}&session_id=${encodeURIComponent(sessionId)}`)
   socket.onopen = () => {
     wsState.value = 'connected'
+    reconnectDelay = 1000
+    // 连接就绪后补发排队指令
+    const queued = outbox
+    outbox = []
+    for (const payload of queued) socket.send(JSON.stringify(payload))
   }
   socket.onclose = () => {
     wsState.value = 'disconnected'
     streaming.value = false
     socketSessionId = null
     socket = null
-    if (!manualClose) {
+    if (!manualClose && currentSessionId.value) {
+      // 指数退避重连，上限 15s
       reconnectTimer = setTimeout(() => {
+        reconnectTimer = null
         if (currentSessionId.value) connectWS(currentSessionId.value)
-      }, 3000)
+      }, reconnectDelay)
+      reconnectDelay = Math.min(reconnectDelay * 2, 15000)
     }
   }
   socket.onerror = () => {
@@ -337,6 +391,7 @@ function connectWS(sessionId) {
 
 function closeSocket() {
   manualClose = true
+  outbox = []
   if (reconnectTimer) {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
@@ -344,6 +399,7 @@ function closeSocket() {
   if (socket) {
     try {
       socket.onclose = null
+      socket.onmessage = null
       socket.close()
     } catch (e) {
       /* ignore */
@@ -364,6 +420,8 @@ function handleMessage(raw) {
   if (!data || typeof data !== 'object') return
   const type = data.type || 'delta'
   switch (type) {
+    case 'pong':
+      return
     case 'delta':
       appendDelta(data.content || data.text || '')
       break
@@ -380,16 +438,25 @@ function handleMessage(raw) {
       upsertToolResult(data)
       break
     case 'info':
-      messages.value.push({ id: nextId(), role: 'info', content: data.text || '' })
+      notify(data.text || '', 'ok')
       break
     case 'error':
       streaming.value = false
+      finishPendingTools()
       messages.value.push({ id: nextId(), role: 'error', content: data.message || '未知错误' })
+      break
+    case 'cancelled':
+      streaming.value = false
+      finishPendingTools()
+      messages.value.push({ id: nextId(), role: 'info', content: '已停止生成' })
+      loadSessions()
       break
     case 'done':
     case 'end':
     case 'finished':
       streaming.value = false
+      finishPendingTools()
+      loadSessions()
       break
     default:
       if (data.content && data.role !== 'user') appendDelta(data.content)
@@ -398,19 +465,24 @@ function handleMessage(raw) {
   scrollToBottom()
 }
 
+/* 生成结束时把仍在 running 的工具卡片收尾，避免永久转圈 */
+function finishPendingTools() {
+  for (const m of messages.value) {
+    if (m.role === 'tool_call' && m.status === 'running') m.status = 'done'
+  }
+}
+
 function appendDelta(text) {
   if (!text) return
-  const last = messages.value[messages.value.length - 1]
-  if (last && last.role === 'assistant' && streaming.value) {
-    last.content += text
-  } else {
-    messages.value.push({ id: nextId(), role: 'assistant', content: text })
-  }
   streaming.value = true
+  const last = messages.value[messages.value.length - 1]
+  if (last && last.role === 'assistant') last.content += text
+  else messages.value.push({ id: nextId(), role: 'assistant', content: text })
 }
 
 function appendThinking(text) {
   if (!text) return
+  streaming.value = true
   const last = messages.value[messages.value.length - 1]
   if (last && last.role === 'thinking') last.content += text
   else messages.value.push({ id: nextId(), role: 'thinking', content: text })
@@ -418,16 +490,22 @@ function appendThinking(text) {
 
 function upsertToolCall(data) {
   const name = data.name || '工具'
-  const existing = messages.value.find(
-    (m) => m.role === 'tool_call' && m.name === name && m.status === 'running'
-  )
+  const callId = data.id || data.tool_call_id || null
+  // 优先按后端下发的 call id 匹配，回退到同名 running 卡片
+  const existing = messages.value.find((m) => {
+    if (m.role !== 'tool_call') return false
+    if (callId && m.callId) return m.callId === callId
+    return m.name === name && m.status === 'running'
+  })
   if (existing) {
+    if (callId) existing.callId = callId
     existing.status = data.status || existing.status
     if (data.arguments !== undefined) existing.arguments = data.arguments
     if (data.result !== undefined) existing.result = data.result
   } else {
     messages.value.push({
       id: nextId(),
+      callId,
       role: 'tool_call',
       name,
       status: data.status || 'running',
@@ -438,12 +516,14 @@ function upsertToolCall(data) {
 }
 
 function upsertToolResult(data) {
-  const id = data.tool_call_id
+  const callId = data.tool_call_id || data.id || null
   const existing = messages.value.find(
-    (m) => m.role === 'tool_call' && (m.tool_call_id === id || (id && m.name === data.name))
+    (m) =>
+      m.role === 'tool_call' &&
+      ((callId && m.callId === callId) || (!callId && m.name === data.name))
   )
   if (existing) {
-    existing.status = 'done'
+    existing.status = existing.status === 'error' ? 'error' : 'done'
     if (data.content !== undefined) existing.result = data.content
   } else {
     messages.value.push({
@@ -457,8 +537,12 @@ function upsertToolResult(data) {
 
 /* ---------- 停止 / 重新生成 ---------- */
 function stop() {
-  streaming.value = false
-  closeSocket()
+  // 交由服务端中断本轮生成，不再直接断开连接
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: 'cancel' }))
+  } else {
+    streaming.value = false
+  }
 }
 
 function regenerableOf(m) {
@@ -479,7 +563,7 @@ async function regenerate() {
   messages.value.splice(lastUserIdx + 1)
   streaming.value = true
   ensureSocketAndSend({ type: 'regenerate' })
-  scrollToBottom()
+  scrollToBottom(true)
 }
 
 /* ---------- 会话管理 ---------- */
@@ -497,51 +581,65 @@ async function createNewSession() {
   try {
     const res = await createSession()
     const id = res.id || res.session_id
-    await loadSessions()
+    // 后端已即时落盘，直接乐观插入列表，避免等待刷新造成的空窗
+    if (id && !sessions.value.some((s) => s.id === id)) {
+      sessions.value.unshift({ id, title: '新会话', message_count: 0, status: 'idle' })
+    }
     await switchSession(id)
+    loadSessions()
   } catch (e) {
     notify('新建会话失败：' + e.message, 'error')
   }
 }
 
 async function switchSession(id) {
+  if (id === currentSessionId.value) return
+  closeSocket()
   currentSessionId.value = id
   streaming.value = false
   messages.value = []
+  atBottom.value = true
   try {
     const res = await getSession(id)
     messages.value = normalizeHistory(res?.messages || [])
   } catch (e) {
-    messages.value = []
+    notify('加载会话失败：' + e.message, 'error')
   }
   connectWS(id)
-  scrollToBottom()
+  scrollToBottom(true)
+  if (window.innerWidth <= 720) sidebarCollapsed.value = true
+}
+
+/* 当前会话被移除后，自动切到列表中的下一个会话 */
+async function fallbackAfterRemoval(removedId) {
+  if (currentSessionId.value !== removedId) return
+  closeSocket()
+  currentSessionId.value = null
+  messages.value = []
+  const next = sessions.value[0]
+  if (next) await switchSession(next.id)
 }
 
 async function remove(id) {
-  if (!window.confirm('确定删除该会话？')) return
+  if (!window.confirm('确定删除该会话？删除后不可恢复。')) return
   try {
     await deleteSession(id)
-    await loadSessions()
-    if (currentSessionId.value === id) {
-      currentSessionId.value = null
-      messages.value = []
-      closeSocket()
-    }
+    sessions.value = sessions.value.filter((s) => s.id !== id)
+    await fallbackAfterRemoval(id)
+    loadSessions()
   } catch (e) {
     notify('删除会话失败：' + e.message, 'error')
   }
 }
 
 async function archive(id) {
+  if (!window.confirm('归档该会话？归档后将从列表中移除。')) return
   try {
     await archiveSession(id)
-    await loadSessions()
-    if (currentSessionId.value === id) {
-      currentSessionId.value = null
-      messages.value = []
-      closeSocket()
-    }
+    sessions.value = sessions.value.filter((s) => s.id !== id)
+    await fallbackAfterRemoval(id)
+    loadSessions()
+    notify('会话已归档', 'ok')
   } catch (e) {
     notify('归档失败：' + e.message, 'error')
   }
@@ -551,8 +649,9 @@ async function startRename(s) {
   renamingId.value = s.id
   renameInput.value = s.title || ''
   await nextTick()
-  renameInputEl.value?.focus()
-  renameInputEl.value?.select()
+  const el = Array.isArray(renameInputEl.value) ? renameInputEl.value[0] : renameInputEl.value
+  el?.focus()
+  el?.select()
 }
 
 async function confirmRename() {
@@ -560,11 +659,14 @@ async function confirmRename() {
   const id = renamingId.value
   renamingId.value = null
   const title = renameInput.value.trim()
+  const target = sessions.value.find((s) => s.id === id)
+  if (target && target.title === title) return
   try {
     await renameSession(id, title)
-    await loadSessions()
+    if (target) target.title = title || '新会话'
   } catch (e) {
     notify('重命名失败：' + e.message, 'error')
+    loadSessions()
   }
 }
 
@@ -573,11 +675,12 @@ function cancelRename() {
 }
 
 async function compressNow() {
-  if (!currentSessionId.value) return
+  if (!currentSessionId.value || streaming.value) return
   try {
-    await triggerCompress(currentSessionId.value)
+    const res = await triggerCompress(currentSessionId.value)
+    messages.value = normalizeHistory(res?.messages || [])
     notify('上下文已压缩', 'ok')
-    await switchSession(currentSessionId.value)
+    scrollToBottom(true)
   } catch (e) {
     notify('压缩失败：' + e.message, 'error')
   }
@@ -610,49 +713,93 @@ function onSetThinking() {
 }
 
 /* ---------- 附件与发送 ---------- */
+const MAX_ATTACHMENTS = 4
+
 function pickImage() {
   fileInput.value?.click()
 }
 
-async function onFileChange(e) {
-  const file = e.target.files?.[0]
-  e.target.value = ''
-  if (!file) return
-  try {
-    const res = await uploadImage(file)
-    const objectId = res?.object_id || res?.id
-    if (!objectId) throw new Error('上传未返回 object_id')
-    pendingAttachments.value.push({
-      object_id: objectId,
-      preview: URL.createObjectURL(file),
-      name: file.name
-    })
-  } catch (err) {
-    notify('上传图片失败：' + err.message, 'error')
+async function uploadOne(file) {
+  const res = await uploadImage(file)
+  const objectId = res?.object_id || res?.id
+  if (!objectId) throw new Error('上传未返回 object_id')
+  pendingAttachments.value.push({
+    object_id: objectId,
+    preview: URL.createObjectURL(file),
+    name: file.name || '图片'
+  })
+}
+
+async function addFiles(files) {
+  const list = Array.from(files || []).filter((f) => f.type.startsWith('image/'))
+  if (!list.length) return
+  const room = MAX_ATTACHMENTS - pendingAttachments.value.length
+  if (room <= 0) {
+    notify(`最多添加 ${MAX_ATTACHMENTS} 张图片`, 'error')
+    return
   }
+  uploading.value = true
+  try {
+    for (const file of list.slice(0, room)) {
+      try {
+        await uploadOne(file)
+      } catch (err) {
+        notify('上传图片失败：' + err.message, 'error')
+      }
+    }
+  } finally {
+    uploading.value = false
+  }
+}
+
+async function onFileChange(e) {
+  const files = e.target.files
+  await addFiles(files)
+  e.target.value = ''
+}
+
+/* 支持直接粘贴剪贴板中的图片 */
+async function onPaste(e) {
+  const files = Array.from(e.clipboardData?.files || []).filter((f) => f.type.startsWith('image/'))
+  if (!files.length) return
+  e.preventDefault()
+  await addFiles(files)
 }
 
 function removeAttachment(i) {
-  pendingAttachments.value.splice(i, 1)
+  const [removed] = pendingAttachments.value.splice(i, 1)
+  if (removed?.preview) URL.revokeObjectURL(removed.preview)
 }
 
+/* 连接未就绪时先入队，onopen 后自动补发 */
 function ensureSocketAndSend(payload) {
   if (!currentSessionId.value) return
-  if (!socket || socket.readyState !== WebSocket.OPEN || socketSessionId !== currentSessionId.value) {
-    connectWS(currentSessionId.value)
+  if (socket && socket.readyState === WebSocket.OPEN && socketSessionId === currentSessionId.value) {
+    socket.send(JSON.stringify(payload))
+    return
   }
-  socket.send(JSON.stringify(payload))
+  outbox.push(payload)
+  connectWS(currentSessionId.value)
 }
 
 async function send() {
+  if (streaming.value) {
+    notify('正在生成，请先停止或等待完成', 'error')
+    return
+  }
   const content = input.value.trim()
-  const attachmentIds = pendingAttachments.value.map((a) => a.object_id)
-  if (!content && !attachmentIds.length) return
+  const atts = pendingAttachments.value.slice()
+  if (!content && !atts.length) return
+  if (uploading.value) {
+    notify('图片仍在上传中，请稍候', 'error')
+    return
+  }
+
   if (!currentSessionId.value) {
     try {
       const res = await createSession()
-      await loadSessions()
       currentSessionId.value = res.id || res.session_id
+      loadSessions()
     } catch (e) {
       notify('创建会话失败：' + e.message, 'error')
       return
@@ -663,18 +810,27 @@ async function send() {
     id: nextId(),
     role: 'user',
     content,
-    attachments: pendingAttachments.value.map((a) => ({ object_id: a.object_id, preview: a.preview }))
+    attachments: atts.map((a) => ({ object_id: a.object_id, preview: a.preview }))
   })
-  scrollToBottom()
 
   input.value = ''
   pendingAttachments.value = []
+  streaming.value = true
+  nextTick(() => {
+    // 清空后复位输入框高度，否则会保留多行时撑开的尺寸
+    const el = inputEl.value
+    if (el) {
+      el.style.height = 'auto'
+      el.focus()
+    }
+  })
+  scrollToBottom(true)
 
   ensureSocketAndSend({
-    type: 'chat',
+    type: 'message',
     session_id: currentSessionId.value,
     content,
-    attachments: attachmentIds
+    attachments: atts.map((a) => a.object_id)
   })
 }
 
@@ -682,6 +838,7 @@ async function send() {
 let noticeTimer = null
 const notice = ref({ text: '', type: 'ok' })
 function notify(text, type = 'ok') {
+  if (!text) return
   notice.value = { text, type }
   if (noticeTimer) clearTimeout(noticeTimer)
   noticeTimer = setTimeout(() => {
@@ -689,9 +846,15 @@ function notify(text, type = 'ok') {
   }, 3000)
 }
 
-watch(messages, () => scrollToBottom(), { deep: true })
+// 流式追加内容时保持贴底（用户上滚查看历史时不打断）
+watch(() => messages.value.length, () => scrollToBottom())
+watch(
+  () => messages.value[messages.value.length - 1]?.content,
+  () => scrollToBottom()
+)
 
 onMounted(async () => {
+  if (window.innerWidth <= 720) sidebarCollapsed.value = true
   await Promise.all([loadSessions(), loadModelsMeta()])
   // 默认打开最近会话（列表首条）
   if (sessions.value.length) {
@@ -701,6 +864,10 @@ onMounted(async () => {
 
 onUnmounted(() => {
   closeSocket()
+  if (noticeTimer) clearTimeout(noticeTimer)
+  for (const a of pendingAttachments.value) {
+    if (a.preview) URL.revokeObjectURL(a.preview)
+  }
 })
 </script>
 
@@ -737,6 +904,11 @@ onUnmounted(() => {
   border-color: var(--err);
 }
 
+.notice.error {
+  color: var(--err);
+  border-color: var(--err);
+}
+
 /* 侧栏 */
 .sidebar {
   width: 268px;
@@ -747,6 +919,14 @@ onUnmounted(() => {
   flex-direction: column;
   padding: 12px;
   gap: 10px;
+  transition: width 0.18s ease, padding 0.18s ease;
+}
+
+.sidebar.collapsed {
+  width: 0;
+  padding: 12px 0;
+  overflow: hidden;
+  border-right: none;
 }
 
 .new-btn {
@@ -912,6 +1092,36 @@ onUnmounted(() => {
   flex: 1 1 auto;
 }
 
+.toggle-side {
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1;
+  flex: 0 0 auto;
+}
+
+.to-bottom {
+  position: absolute;
+  top: -40px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text-weak);
+  box-shadow: 0 2px 8px var(--shadow);
+}
+
+.to-bottom:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 .conn-state {
   color: var(--text-weak);
   white-space: nowrap;
@@ -998,6 +1208,7 @@ onUnmounted(() => {
 
 .composer {
   flex: 0 0 auto;
+  position: relative;
   border-top: 1px solid var(--border);
   padding: 12px 16px;
   display: flex;
@@ -1082,7 +1293,18 @@ onUnmounted(() => {
 /* 移动端适配 */
 @media (max-width: 720px) {
   .sidebar {
-    width: 220px;
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 20;
+    width: 230px;
+    box-shadow: 2px 0 12px var(--shadow);
+  }
+
+  .sidebar.collapsed {
+    width: 0;
+    box-shadow: none;
   }
 
   .s-action {

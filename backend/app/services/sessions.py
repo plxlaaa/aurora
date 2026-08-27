@@ -27,11 +27,11 @@ class SessionStore:
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        # Track active session status: {session_id: status}
+        # 会话运行状态：{session_id: status}
         self._status: dict[str, str] = {}
         self._status_path = self.data_dir / "_status.json"
         self._load_status()
-        # Custom session titles: {session_id: title}
+        # 自定义会话标题：{session_id: title}
         self._titles: dict[str, str] = {}
         self._titles_path = self.data_dir / "_titles.json"
         self._load_titles()
@@ -43,6 +43,12 @@ class SessionStore:
                     self._status = json.load(fh)
             except Exception:
                 self._status = {}
+        # 进程重启后不可能仍有会话在生成中，重置残留的 running 状态
+        stale = [sid for sid, st in self._status.items() if st == self.STATUS_RUNNING]
+        for sid in stale:
+            self._status[sid] = self.STATUS_IDLE
+        if stale:
+            self._save_status()
 
     def _save_status(self) -> None:
         try:
@@ -69,6 +75,8 @@ class SessionStore:
     def rename(self, session_id: str, title: str) -> None:
         """设置自定义会话标题；传空串则清除自定义标题。"""
         with self._lock:
+            if not self._path(session_id).exists():
+                raise FileNotFoundError(session_id)
             if title and title.strip():
                 self._titles[session_id] = title.strip()[:80]
             else:
@@ -96,14 +104,59 @@ class SessionStore:
         return self.data_dir / f"{safe}.jsonl"
 
     def create(self) -> str:
+        """创建会话并立即落盘空文件，确保新会话在列表中可见。"""
         sid = uuid.uuid4().hex[:24]
+        with self._lock:
+            self._path(sid).touch(exist_ok=True)
+            self._status[sid] = self.STATUS_IDLE
+            self._save_status()
         return sid
+
+    def exists(self, session_id: str) -> bool:
+        with self._lock:
+            return self._path(session_id).exists()
 
     def append(self, session_id: str, message: dict[str, Any]) -> None:
         with self._lock:
             path = self._path(session_id)
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(message, ensure_ascii=False) + "\n")
+
+    def append_stream(self, session_id: str, role: str, text: str) -> None:
+        """追加流式增量：合并进末尾的同 role 记录，避免 JSONL 行数爆炸。"""
+        if not text:
+            return
+        with self._lock:
+            path = self._path(session_id)
+            messages = self.load(session_id)
+            if messages and messages[-1].get("role") == role:
+                messages[-1]["content"] = (messages[-1].get("content") or "") + text
+                self.save(session_id, messages)
+                return
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(
+                    json.dumps({"role": role, "content": text}, ensure_ascii=False) + "\n"
+                )
+
+    def collapse_deltas(self, session_id: str) -> None:
+        """一轮生成结束后，将连续的 assistant_delta 合并为单条 assistant 消息。"""
+        with self._lock:
+            messages = self.load(session_id)
+            if not any(m.get("role") == "assistant_delta" for m in messages):
+                return
+            merged: list[dict[str, Any]] = []
+            for msg in messages:
+                if msg.get("role") != "assistant_delta":
+                    merged.append(msg)
+                    continue
+                text = msg.get("content") or ""
+                if merged and merged[-1].get("role") == "assistant" and merged[-1].get("_from_delta"):
+                    merged[-1]["content"] = (merged[-1].get("content") or "") + text
+                else:
+                    merged.append({"role": "assistant", "content": text, "_from_delta": True})
+            for msg in merged:
+                msg.pop("_from_delta", None)
+            self.save(session_id, merged)
 
     def load(self, session_id: str) -> list[dict[str, Any]]:
         with self._lock:
@@ -123,10 +176,24 @@ class SessionStore:
             return messages
 
     def clear(self, session_id: str) -> None:
+        """清空会话内容但保留会话本身（文件截断为空）。"""
         with self._lock:
             path = self._path(session_id)
             if path.exists():
+                path.write_text("", encoding="utf-8")
+
+    def delete(self, session_id: str) -> bool:
+        """彻底删除会话文件与附属状态；返回会话此前是否存在。"""
+        with self._lock:
+            path = self._path(session_id)
+            existed = path.exists()
+            if existed:
                 path.unlink()
+            self._status.pop(path.stem, None)
+            self._titles.pop(path.stem, None)
+            self._save_status()
+            self._save_titles()
+            return existed
 
     def save(self, session_id: str, messages: list[dict[str, Any]]) -> None:
         with self._lock:
@@ -145,37 +212,49 @@ class SessionStore:
             archive_dir.mkdir(exist_ok=True)
             dest = archive_dir / path.name
             path.replace(dest)
+            self._status.pop(path.stem, None)
+            self._save_status()
             return dest
 
     def list_sessions(self) -> list[dict[str, Any]]:
+        """返回会话列表，按最后更新时间倒序（最新在前）。"""
         with self._lock:
             sessions = []
-            for path in sorted(self.data_dir.glob("*.jsonl")):
-                # 一次遍历同时提取首条 user 消息标题与消息计数
-                title = path.stem
+            for path in self.data_dir.glob("*.jsonl"):
+                # 一次遍历同时提取首条 user 消息标题与可见消息计数
                 preview = ""
                 count = 0
-                with open(path, encoding="utf-8") as fh:
-                    for line in fh:
-                        count += 1
-                        if not preview:
+                try:
+                    with open(path, encoding="utf-8") as fh:
+                        for line in fh:
+                            line = line.strip()
+                            if not line:
+                                continue
                             try:
                                 msg = json.loads(line)
                             except json.JSONDecodeError:
                                 continue
-                            if msg.get("role") == "user":
+                            role = msg.get("role")
+                            # assistant_delta 为流式碎片，不计入消息数
+                            if role != "assistant_delta":
+                                count += 1
+                            if not preview and role == "user":
                                 content = msg.get("content", "")
                                 if isinstance(content, str) and content.strip():
                                     preview = content.strip()[:50]
+                except OSError:
+                    continue
                 stat = path.stat()
                 sessions.append(
                     {
                         "id": path.stem,
-                        "title": self._titles.get(path.stem) or preview or title,
+                        "title": self._titles.get(path.stem) or preview or "新会话",
                         "message_count": count,
                         "status": self.get_status(path.stem),
                         "created_at": dt.datetime.fromtimestamp(stat.st_ctime, tz=dt.timezone.utc).isoformat(),
                         "updated_at": dt.datetime.fromtimestamp(stat.st_mtime, tz=dt.timezone.utc).isoformat(),
+                        "mtime": stat.st_mtime,
                     }
                 )
+            sessions.sort(key=lambda s: s.pop("mtime"), reverse=True)
             return sessions

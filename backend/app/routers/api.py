@@ -17,24 +17,31 @@
 - GET  /api/sessions        会话列表
 - POST /api/sessions        新建会话
 - GET  /api/sessions/{id}   读取会话
-- DELETE /api/sessions/{id} 清空会话
+- DELETE /api/sessions/{id} 删除会话
+- POST /api/sessions/{id}/clear    清空会话消息
 - POST /api/sessions/{id}/archive  归档会话
+- POST /api/sessions/{id}/rename   重命名会话
 - POST /api/auth/login      换取 JWT（无需鉴权）
 - WS   /api/chat            对话 WebSocket
 """
 from __future__ import annotations
 
+import asyncio
+import base64
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 
 from ..core import auth
-from ..services.upload import UploadError, load_object, save_upload
+from ..services.upload import UploadError, load_object_with_mime, save_upload
 
 from .deps import compressor, executor, logger, mcp_mgr, pipeline, registry, sessions, settings, skills_mgr, vision
 
 router = APIRouter()
+
+# 思考强度 → 采样温度
+THINKING_TEMPERATURE = {"low": 0.3, "normal": 0.7, "high": 1.0}
 
 
 def require_auth(authorization: Annotated[str | None, Header()] = None) -> None:
@@ -163,10 +170,11 @@ async def upload_file(
 
 @router.get("/api/files/{object_id}")
 async def get_file(object_id: str, _: Annotated[None, Depends(require_auth)]) -> Response:
-    data = load_object(object_id)
-    if data is None:
+    found = load_object_with_mime(object_id)
+    if found is None:
         raise HTTPException(status_code=404, detail="文件不存在")
-    return Response(content=data, media_type="application/octet-stream")
+    data, mime = found
+    return Response(content=data, media_type=mime, headers={"Cache-Control": "private, max-age=86400"})
 
 
 @router.post("/api/run-code")
@@ -192,10 +200,10 @@ async def manual_compress(
     messages = sessions.load(session_id)
     if not messages:
         raise HTTPException(status_code=404, detail="会话不存在或为空")
-    compressed = await compressor.compress(messages)
-    sessions.clear(session_id)
-    for msg in compressed:
-        sessions.append(session_id, msg)
+    # 压缩前先把流式碎片合并，避免摘要里出现大量 assistant_delta 片段
+    sessions.collapse_deltas(session_id)
+    compressed = await compressor.compress(sessions.load(session_id))
+    sessions.save(session_id, compressed)
     return {"ok": True, "messages": compressed}
 
 
@@ -212,11 +220,26 @@ async def create_session(_: Annotated[None, Depends(require_auth)]) -> dict[str,
 
 @router.get("/api/sessions/{session_id}")
 async def get_session(session_id: str, _: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
-    return {"id": session_id, "messages": sessions.load(session_id)}
+    if not sessions.exists(session_id):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {
+        "id": session_id,
+        "messages": sessions.load(session_id),
+        "status": sessions.get_status(session_id),
+    }
 
 
 @router.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str, _: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
+    if not sessions.delete(session_id):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {"ok": True}
+
+
+@router.post("/api/sessions/{session_id}/clear")
+async def clear_session(session_id: str, _: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
+    if not sessions.exists(session_id):
+        raise HTTPException(status_code=404, detail="会话不存在")
     sessions.clear(session_id)
     return {"ok": True}
 
@@ -237,11 +260,12 @@ async def rename_session(
     payload: dict[str, Any],
     _: Annotated[None, Depends(require_auth)],
 ) -> dict[str, Any]:
+    title = payload.get("title", "")
     try:
-        sessions.rename(session_id, payload.get("title", ""))
+        sessions.rename(session_id, title)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="会话不存在")
-    return {"ok": True, "title": sessions.list_sessions()}
+    return {"ok": True, "id": session_id, "title": title}
 
 
 @router.post("/api/auth/login")
@@ -259,15 +283,23 @@ async def login(payload: dict[str, Any]) -> dict[str, Any]:
 # ---------- WebSocket ----------
 def _resolve_attachments(attachments: list[Any]) -> list[dict[str, Any]]:
     """将附件引用解析为可送入视觉路由的 image 结构（仅接受图片）。"""
-    import base64
-
-    resolved = []
+    resolved: list[dict[str, Any]] = []
     for att in attachments:
-        if isinstance(att, str):
-            data = load_object(att)
-            if data is None:
+        object_id = att if isinstance(att, str) else None
+        if isinstance(att, dict) and not att.get("base64"):
+            # 前端只给了引用（object_id/id），同样需要网关侧读盘
+            object_id = att.get("object_id") or att.get("id")
+        if object_id:
+            found = load_object_with_mime(object_id)
+            if found is None:
                 continue
-            resolved.append({"type": "image", "object_id": att, "base64": base64.b64encode(data).decode("utf-8")})
+            data, mime = found
+            resolved.append({
+                "type": "image",
+                "object_id": object_id,
+                "mime_type": mime,
+                "base64": base64.b64encode(data).decode("utf-8"),
+            })
         elif isinstance(att, dict) and att.get("type") == "image":
             resolved.append(att)
     return resolved
@@ -279,7 +311,7 @@ def _record_event(session_id: str, event: dict[str, Any]) -> None:
     if etype == "assistant_message":
         sessions.append(session_id, {"role": "assistant", "content": event.get("content", "")})
     elif etype == "thinking":
-        sessions.append(session_id, {"role": "thinking", "content": event.get("text", "")})
+        sessions.append_stream(session_id, "thinking", event.get("text", ""))
     elif etype == "tool_call":
         sessions.append(session_id, {
             "role": "tool_call",
@@ -296,7 +328,8 @@ def _record_event(session_id: str, event: dict[str, Any]) -> None:
             "content": event.get("content"),
         })
     elif etype == "delta" and event.get("text"):
-        sessions.append(session_id, {"role": "assistant_delta", "content": event.get("text")})
+        # 流式增量合并进末尾同 role 记录，避免 JSONL 行数爆炸
+        sessions.append_stream(session_id, "assistant_delta", event.get("text", ""))
 
 
 @router.websocket("/api/chat")
@@ -324,6 +357,42 @@ async def chat(ws: WebSocket) -> None:
         await ws.send_json(event)
         _record_event(session_id, event)
 
+    # 连接局部状态：模型与温度只影响本连接，不污染全局 registry
+    conn_model: str | None = None
+    conn_temperature = THINKING_TEMPERATURE["normal"]
+    current_task: asyncio.Task[None] | None = None
+    cancel_event: asyncio.Event | None = None
+
+    async def generate(history: list[dict[str, Any]], resolved: list[dict[str, Any]],
+                       force_compress: bool, cancel: asyncio.Event) -> None:
+        """在独立任务中执行一轮生成，便于接收循环并发处理 cancel 指令。"""
+        sessions.mark_running(session_id)
+        try:
+            await pipeline.run_full(
+                history,
+                resolved,
+                sink,
+                force_compress=force_compress,
+                temperature=conn_temperature,
+                model_name=conn_model,
+                cancel=cancel,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("对话处理失败")
+            try:
+                await ws.send_json({"type": "error", "message": str(exc)})
+            except Exception:  # noqa: BLE001
+                pass
+        finally:
+            # 把本轮流式碎片合并为单条 assistant 消息后再落状态
+            sessions.collapse_deltas(session_id)
+            sessions.mark_completed(session_id)
+
+    def busy() -> bool:
+        return current_task is not None and not current_task.done()
+
     try:
         while True:
             msg = await ws.receive_json()
@@ -332,40 +401,49 @@ async def chat(ws: WebSocket) -> None:
                 await ws.send_json({"type": "pong"})
                 continue
 
+            # 中断当前生成：置位事件，由 pipeline 在下一个 chunk 边界停止
+            if msg_type in ("cancel", "stop"):
+                if cancel_event is not None and busy():
+                    cancel_event.set()
+                else:
+                    await ws.send_json({"type": "cancelled"})
+                continue
+
             # 后端主动推送的消息（欢迎语/通知/提醒）
             if msg_type == "assistant_message":
                 content = msg.get("content", "")
                 sessions.append(session_id, {"role": "assistant", "content": content})
-                await sink({"type": "delta", "text": content})
-                await sink({"type": "done"})
+                await ws.send_json({"type": "delta", "text": content})
+                await ws.send_json({"type": "done"})
                 continue
 
-            # 允许前端通过轻量消息切换当前模型（不重新建会话）
+            # 允许前端通过轻量消息切换当前模型（仅作用于本连接）
             if msg_type == "switch_model":
                 model_name = msg.get("model_name") or ""
-                if model_name:
-                    current_client = registry.get("main")
-                    if current_client and current_client.info.model_name != model_name:
-                        current_client.info.model_name = model_name
-                        await sink({"type": "info", "text": f"已切换到模型: {model_name}"})
+                if model_name and model_name != conn_model:
+                    conn_model = model_name
+                    await ws.send_json({"type": "info", "text": f"已切换到模型: {model_name}"})
                 continue
 
-            # 思考强度调整
+            # 思考强度调整 → 采样温度（仅作用于本连接）
             if msg_type == "set_thinking":
                 level = msg.get("level") or "normal"
-                temp_map = {"low": 0.3, "normal": 0.7, "high": 1.0}
-                temperature = temp_map.get(level, 0.7)
-                await sink({"type": "info", "text": f"思考强度已设为: {level}"})
+                conn_temperature = THINKING_TEMPERATURE.get(level, THINKING_TEMPERATURE["normal"])
+                await ws.send_json({"type": "info", "text": f"思考强度已设为: {level}"})
                 continue
 
             # 保存完整会话历史
             if msg_type == "save_session":
-                history = sessions.load(session_id)
-                sessions.save(session_id, history)
+                sessions.collapse_deltas(session_id)
+                continue
+
+            if msg_type in ("message", "regenerate") and busy():
+                await ws.send_json({"type": "error", "message": "上一轮生成尚未结束"})
                 continue
 
             # 重新生成上一条回复：删除最后一个 user 消息之后的全部内容并重新推理
             if msg_type == "regenerate":
+                sessions.collapse_deltas(session_id)
                 history = sessions.load(session_id)
                 idx = None
                 for i in range(len(history) - 1, -1, -1):
@@ -377,24 +455,21 @@ async def chat(ws: WebSocket) -> None:
                     continue
                 del history[idx + 1 :]
                 sessions.save(session_id, history)
-                last_user = history[idx]
-                resolved = _resolve_attachments(last_user.get("attachments", []))
-                sessions.mark_running(session_id)
-                try:
-                    await pipeline.run_full(history, resolved, sink, force_compress=False)
-                except Exception as exc:  # noqa: BLE001
-                    logger.exception("重新生成失败")
-                    await ws.send_json({"type": "error", "message": str(exc)})
-                finally:
-                    sessions.mark_completed(session_id)
+                resolved = _resolve_attachments(history[idx].get("attachments", []))
+                cancel_event = asyncio.Event()
+                current_task = asyncio.create_task(generate(history, resolved, False, cancel_event))
                 continue
 
             content = msg.get("content", "")
             attachments = msg.get("attachments", [])
             # 仅接受图片附件；object_id 引用已在网关侧解析
             resolved = _resolve_attachments(attachments)
+            if not content.strip() and not resolved:
+                await ws.send_json({"type": "error", "message": "消息内容为空"})
+                continue
 
             # 加载历史，追加本轮 user 消息
+            sessions.collapse_deltas(session_id)
             history = sessions.load(session_id)
             user_msg: dict[str, Any] = {"role": "user", "content": content}
             if resolved:
@@ -402,16 +477,22 @@ async def chat(ws: WebSocket) -> None:
             history.append(user_msg)
             sessions.append(session_id, user_msg)
 
-            force_compress = bool(msg.get("force_compress", False))
-            sessions.mark_running(session_id)
-            try:
-                await pipeline.run_full(history, resolved, sink, force_compress=force_compress)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("对话处理失败")
-                await ws.send_json({"type": "error", "message": str(exc)})
-            finally:
-                sessions.mark_completed(session_id)
+            cancel_event = asyncio.Event()
+            current_task = asyncio.create_task(
+                generate(history, resolved, bool(msg.get("force_compress", False)), cancel_event)
+            )
     except WebSocketDisconnect:
         logger.info("客户端断开连接")
     except Exception as exc:  # noqa: BLE001
         logger.warning("WebSocket 异常: %s", exc)
+    finally:
+        # 连接结束时终止仍在跑的生成任务，避免向已关闭的 socket 写入
+        if current_task is not None and not current_task.done():
+            if cancel_event is not None:
+                cancel_event.set()
+            current_task.cancel()
+            try:
+                await current_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        sessions.collapse_deltas(session_id)

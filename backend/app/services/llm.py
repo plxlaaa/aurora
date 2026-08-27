@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
 import httpx
@@ -52,7 +52,13 @@ class LLMClient:
         await self._client.aclose()
 
     async def probe(self) -> None:
-        """调用 /v1/models 探测端点可用性与模态能力。"""
+        """调用 /v1/models 探测端点可用性、模态能力与可用模型列表。"""
+        if not self.info.base_url:
+            self.info.available = False
+            self.info.detected_modality = None
+            self.info.models = []
+            self.info.error = "未配置 base_url"
+            return
         try:
             resp = await self._client.get("/models")
             resp.raise_for_status()
@@ -60,9 +66,13 @@ class LLMClient:
             models = data.get("data", [])
             self.info.available = True
             self.info.detected_modality = self._infer_modality(models)
+            self.info.models = [m.get("id", "") for m in models if m.get("id")]
+            self.info.error = ""
         except Exception as exc:  # noqa: BLE001
             self.info.available = False
             self.info.detected_modality = None
+            self.info.models = []
+            self.info.error = str(exc)[:200]
             logger.warning("端点 %s 探测失败: %s", self.info.name, exc)
 
     @staticmethod
@@ -88,10 +98,12 @@ class LLMClient:
             message = f"{message} - {snippet}"
         return httpx.HTTPStatusError(message, request=resp.request, response=resp)
 
-    def _maybe_retry_without_tools(self, resp: httpx.Response, body: bytes) -> bool:
+    def _maybe_retry_without_tools(
+        self, resp: httpx.Response, body: bytes, model: str | None = None
+    ) -> bool:
         """工具调用被拒绝时记录模型并返回 True，调用方应去掉 tools 重试。"""
         if self._is_tools_blocked_error(body):
-            self._tools_blocked.add(self.info.model_name)
+            self._tools_blocked.add(model or self.info.model_name)
             return True
         return False
 
@@ -102,14 +114,16 @@ class LLMClient:
         tools: list[dict[str, Any]] | None = None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
+        model_name: str | None = None,
     ) -> dict[str, Any]:
         """非流式补全，返回 OpenAI 格式响应。"""
+        model = model_name or self.info.model_name
         while True:
             use_tools = tools
-            if use_tools and self.info.model_name in self._tools_blocked:
+            if use_tools and model in self._tools_blocked:
                 use_tools = None
             payload: dict[str, Any] = {
-                "model": self.info.model_name,
+                "model": model,
                 "messages": messages,
                 "temperature": temperature,
                 "stream": False,
@@ -121,7 +135,7 @@ class LLMClient:
             resp = await self._client.post("/chat/completions", json=payload)
             if resp.status_code == 400 and use_tools:
                 body = resp.content
-                if self._maybe_retry_without_tools(resp, body):
+                if self._maybe_retry_without_tools(resp, body, model):
                     continue
                 raise self._http_error(resp, body)
             if resp.status_code >= 400:
@@ -135,14 +149,16 @@ class LLMClient:
         tools: list[dict[str, Any]] | None = None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
+        model_name: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """流式补全，逐块 yield SSE 解析后的 JSON 字典。"""
+        model = model_name or self.info.model_name
         while True:
             use_tools = tools
-            if use_tools and self.info.model_name in self._tools_blocked:
+            if use_tools and model in self._tools_blocked:
                 use_tools = None
             payload: dict[str, Any] = {
-                "model": self.info.model_name,
+                "model": model,
                 "messages": messages,
                 "temperature": temperature,
                 "stream": True,
@@ -156,7 +172,7 @@ class LLMClient:
             ) as resp:
                 if resp.status_code == 400 and use_tools:
                     body = await resp.aread()
-                    if self._maybe_retry_without_tools(resp, body):
+                    if self._maybe_retry_without_tools(resp, body, model):
                         continue
                     raise self._http_error(resp, body)
                 if resp.status_code >= 400:
@@ -232,5 +248,7 @@ class ModelRegistry:
                 "detected_modality": ep.detected_modality,
                 "available": ep.available,
                 "enabled": ep.enabled,
+                "models": ep.models,
+                "error": ep.error,
             }
         return out

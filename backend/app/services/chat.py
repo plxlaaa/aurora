@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Awaitable, Callable
@@ -83,10 +84,15 @@ class ChatPipeline:
         *,
         force_compress: bool = False,
         temperature: float = 0.7,
+        model_name: str | None = None,
+        cancel: asyncio.Event | None = None,
     ) -> dict[str, Any]:
         client = self.registry.get("main")
         if client is None:
             raise RuntimeError("主模型端点未配置")
+
+        def cancelled() -> bool:
+            return cancel is not None and cancel.is_set()
 
         # 网关记录格式 → OpenAI 标准消息（过滤 thinking/tool_call 等展示性记录）
         messages = _normalize_messages(messages)
@@ -101,7 +107,7 @@ class ChatPipeline:
                     raise RuntimeError("视觉端点不可用")
                 vision_messages = list(messages)
                 self.vision.attach_image_to_messages(vision_messages, image_attachments)
-                return await self._vision_roundtrip(vis_client, vision_messages, sink)
+                return await self._vision_roundtrip(vis_client, vision_messages, sink, cancel)
             self.vision.attach_image_to_messages(messages, image_attachments)
 
         # 2. 上下文压缩
@@ -116,6 +122,10 @@ class ChatPipeline:
         history = list(messages)
 
         for _round in range(MAX_TOOL_ROUNDS):
+            if cancelled():
+                await sink({"type": "cancelled"})
+                return {"done": True, "cancelled": True}
+
             full_content = ""
             pending_calls: dict[int, dict[str, Any]] = {}
 
@@ -146,21 +156,38 @@ class ChatPipeline:
                     if fn.get("arguments"):
                         slot["function"]["arguments"] += fn["arguments"]
 
-            async for chunk in client.chat_completion_stream(
-                history, tools=tools or None, temperature=temperature
-            ):
-                await handle_chunk(chunk)
+            interrupted = False
+            stream = client.chat_completion_stream(
+                history,
+                tools=tools or None,
+                temperature=temperature,
+                model_name=model_name,
+            )
+            try:
+                async for chunk in stream:
+                    if cancelled():
+                        interrupted = True
+                        break
+                    await handle_chunk(chunk)
+            finally:
+                await stream.aclose()
 
+            if interrupted:
+                await sink({"type": "cancelled"})
+                return {"done": True, "cancelled": True, "content": full_content}
+
+            # 按 index 顺序还原工具调用，保持与模型输出一致
             completed_calls = [
                 {
-                    "id": v["id"],
+                    "id": pending_calls[idx]["id"],
                     "type": "function",
                     "function": {
-                        "name": v["function"]["name"],
-                        "arguments": v["function"]["arguments"],
+                        "name": pending_calls[idx]["function"]["name"],
+                        "arguments": pending_calls[idx]["function"]["arguments"],
                     },
                 }
-                for v in sorted(pending_calls.values(), key=lambda x: x.get("id") or "")
+                for idx in sorted(pending_calls)
+                if pending_calls[idx]["function"]["name"]
             ]
 
             assistant_msg: dict[str, Any] = {"role": "assistant", "content": full_content}
@@ -172,7 +199,10 @@ class ChatPipeline:
                 await sink({"type": "done"})
                 return {"done": True, "content": full_content}
 
-            await self._execute_tools(completed_calls, history, sink)
+            await self._execute_tools(completed_calls, history, sink, cancel)
+            if cancelled():
+                await sink({"type": "cancelled"})
+                return {"done": True, "cancelled": True}
 
         await sink({"type": "done", "result": "达到最大工具调用轮次"})
         return {"done": True}
@@ -182,32 +212,53 @@ class ChatPipeline:
         completed_calls: list[dict[str, Any]],
         history: list[dict[str, Any]],
         sink: DeltaSink,
+        cancel: asyncio.Event | None = None,
     ) -> None:
         """执行模型请求的工具调用，将结果以 tool 消息回填历史。"""
         for call in completed_calls:
             name = call["function"]["name"]
+            call_id = call.get("id") or name
+            if cancel is not None and cancel.is_set():
+                history.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "name": name,
+                        "content": json.dumps({"error": "已取消"}, ensure_ascii=False),
+                    }
+                )
+                continue
             try:
                 arguments = json.loads(call["function"]["arguments"] or "{}")
             except json.JSONDecodeError:
                 arguments = {}
+            if not isinstance(arguments, dict):
+                arguments = {"input": arguments}
             await sink({
                 "type": "tool_call",
+                "id": call_id,
                 "name": name,
                 "status": "running",
                 "arguments": arguments,
             })
+            status = "done"
             try:
                 if name.startswith("mcp_"):
                     result = await self.mcp.dispatch(name, arguments)
                 else:
                     result = await self.skills.execute(name, arguments)
+                if isinstance(result, dict) and result.get("error"):
+                    status = "error"
             except Exception as exc:  # noqa: BLE001
+                logger.warning("工具 %s 调用失败: %s", name, exc)
                 result = {"error": f"工具调用失败: {exc}"}
+                status = "error"
             await sink(
                 {
                     "type": "tool_call",
+                    "id": call_id,
                     "name": name,
-                    "status": "done",
+                    "status": status,
                     "arguments": arguments,
                     "result": result,
                 }
@@ -215,7 +266,7 @@ class ChatPipeline:
             history.append(
                 {
                     "role": "tool",
-                    "tool_call_id": call.get("id") or name,
+                    "tool_call_id": call_id,
                     "name": name,
                     "content": json.dumps(result, ensure_ascii=False),
                 }
@@ -223,17 +274,30 @@ class ChatPipeline:
 
     # -- 视觉独立端点往返 --
     async def _vision_roundtrip(
-        self, vis_client, messages, sink: DeltaSink
+        self, vis_client, messages, sink: DeltaSink, cancel: asyncio.Event | None = None
     ) -> dict[str, Any]:
         full = ""
-        async for chunk in vis_client.chat_completion_stream(messages, max_tokens=2048):
-            choices = chunk.get("choices") or []
-            if not choices:
-                continue
-            delta = choices[0].get("delta") or {}
-            if delta.get("content"):
-                full += delta["content"]
-                await sink({"type": "delta", "text": delta["content"]})
-        await sink({"type": "tool_call", "name": "vision", "status": "done"})
+        interrupted = False
+        stream = vis_client.chat_completion_stream(messages, max_tokens=2048)
+        try:
+            async for chunk in stream:
+                if cancel is not None and cancel.is_set():
+                    interrupted = True
+                    break
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                if delta.get("content"):
+                    full += delta["content"]
+                    await sink({"type": "delta", "text": delta["content"]})
+                if delta.get("reasoning_content"):
+                    await sink({"type": "thinking", "text": delta["reasoning_content"]})
+        finally:
+            await stream.aclose()
+        if interrupted:
+            await sink({"type": "cancelled"})
+            return {"done": True, "cancelled": True, "content": full}
+        await sink({"type": "tool_call", "name": "vision", "status": "done", "result": "已完成图片理解"})
         await sink({"type": "done"})
         return {"done": True, "content": full}
