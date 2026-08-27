@@ -45,6 +45,8 @@ class LLMClient:
     def __init__(self, endpoint: EndpointInfo) -> None:
         self.info = endpoint
         self._client = _build_client(endpoint.base_url, endpoint.api_key)
+        # 记录不支持 function calling 的模型名，避免反复失败重试
+        self._tools_blocked: set[str] = set()
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -71,6 +73,28 @@ class LLMClient:
                 return "multimodal"
         return "text"
 
+    @staticmethod
+    def _is_tools_blocked_error(body: bytes) -> bool:
+        """判断 400 是否因模型不支持 function calling 所致。"""
+        text = body.decode("utf-8", "ignore").lower()
+        return "function call" in text and "not supported" in text
+
+    @staticmethod
+    def _http_error(resp: httpx.Response, body: bytes) -> httpx.HTTPStatusError:
+        """构造带响应体的 HTTPStatusError，便于排查 4xx/5xx 根因。"""
+        snippet = body.decode("utf-8", "ignore").strip()[:500]
+        message = f"{resp.status_code} {resp.reason_phrase}"
+        if snippet:
+            message = f"{message} - {snippet}"
+        return httpx.HTTPStatusError(message, request=resp.request, response=resp)
+
+    def _maybe_retry_without_tools(self, resp: httpx.Response, body: bytes) -> bool:
+        """工具调用被拒绝时记录模型并返回 True，调用方应去掉 tools 重试。"""
+        if self._is_tools_blocked_error(body):
+            self._tools_blocked.add(self.info.model_name)
+            return True
+        return False
+
     async def chat_completion(
         self,
         messages: list[dict[str, Any]],
@@ -80,19 +104,29 @@ class LLMClient:
         max_tokens: int | None = None,
     ) -> dict[str, Any]:
         """非流式补全，返回 OpenAI 格式响应。"""
-        payload: dict[str, Any] = {
-            "model": self.info.model_name,
-            "messages": messages,
-            "temperature": temperature,
-            "stream": False,
-        }
-        if tools:
-            payload["tools"] = tools
-        if max_tokens:
-            payload["max_tokens"] = max_tokens
-        resp = await self._client.post("/chat/completions", json=payload)
-        resp.raise_for_status()
-        return resp.json()
+        while True:
+            use_tools = tools
+            if use_tools and self.info.model_name in self._tools_blocked:
+                use_tools = None
+            payload: dict[str, Any] = {
+                "model": self.info.model_name,
+                "messages": messages,
+                "temperature": temperature,
+                "stream": False,
+            }
+            if use_tools:
+                payload["tools"] = use_tools
+            if max_tokens:
+                payload["max_tokens"] = max_tokens
+            resp = await self._client.post("/chat/completions", json=payload)
+            if resp.status_code == 400 and use_tools:
+                body = resp.content
+                if self._maybe_retry_without_tools(resp, body):
+                    continue
+                raise self._http_error(resp, body)
+            if resp.status_code >= 400:
+                raise self._http_error(resp, resp.content)
+            return resp.json()
 
     async def chat_completion_stream(
         self,
@@ -103,30 +137,41 @@ class LLMClient:
         max_tokens: int | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """流式补全，逐块 yield SSE 解析后的 JSON 字典。"""
-        payload: dict[str, Any] = {
-            "model": self.info.model_name,
-            "messages": messages,
-            "temperature": temperature,
-            "stream": True,
-        }
-        if tools:
-            payload["tools"] = tools
-        if max_tokens:
-            payload["max_tokens"] = max_tokens
-        async with self._client.stream(
-            "POST", "/chat/completions", json=payload
-        ) as resp:
-            resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if data == "[DONE]":
-                    break
-                try:
-                    yield json.loads(data)
-                except json.JSONDecodeError:
-                    continue
+        while True:
+            use_tools = tools
+            if use_tools and self.info.model_name in self._tools_blocked:
+                use_tools = None
+            payload: dict[str, Any] = {
+                "model": self.info.model_name,
+                "messages": messages,
+                "temperature": temperature,
+                "stream": True,
+            }
+            if use_tools:
+                payload["tools"] = use_tools
+            if max_tokens:
+                payload["max_tokens"] = max_tokens
+            async with self._client.stream(
+                "POST", "/chat/completions", json=payload
+            ) as resp:
+                if resp.status_code == 400 and use_tools:
+                    body = await resp.aread()
+                    if self._maybe_retry_without_tools(resp, body):
+                        continue
+                    raise self._http_error(resp, body)
+                if resp.status_code >= 400:
+                    raise self._http_error(resp, await resp.aread())
+                async for line in resp.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        yield json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+            return
 
 
 class ModelRegistry:

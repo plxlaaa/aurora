@@ -25,6 +25,37 @@ DeltaSink = Callable[[dict[str, Any]], Awaitable[None]]
 
 MAX_TOOL_ROUNDS = 5
 
+# OpenAI 兼容接口允许的 role；网关记录用的 thinking/tool_call/assistant_delta 等不在此列
+_LLM_ROLES = {"system", "user", "assistant", "tool"}
+
+
+def _normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """将网关会话记录转换为 LLM 可接受的标准消息列表。
+
+    丢弃非标准 role（thinking/tool_call/assistant_delta 等展示性记录），
+    保留 assistant 的 tool_calls 与 tool 的 tool_call_id 用于工具循环衔接。
+    """
+    out: list[dict[str, Any]] = []
+    for msg in messages:
+        role = msg.get("role")
+        if role not in _LLM_ROLES:
+            continue
+        content = msg.get("content")
+        if content is None:
+            content = ""
+        normalized: dict[str, Any] = {"role": role, "content": content}
+        if role == "assistant" and msg.get("tool_calls"):
+            normalized["tool_calls"] = msg["tool_calls"]
+        if role == "tool":
+            if msg.get("tool_call_id"):
+                normalized["tool_call_id"] = msg["tool_call_id"]
+            if msg.get("name"):
+                normalized["name"] = msg["name"]
+        if role == "user" and msg.get("attachments"):
+            normalized["attachments"] = msg["attachments"]
+        out.append(normalized)
+    return out
+
 
 class ChatPipeline:
     def __init__(
@@ -56,6 +87,9 @@ class ChatPipeline:
         client = self.registry.get("main")
         if client is None:
             raise RuntimeError("主模型端点未配置")
+
+        # 网关记录格式 → OpenAI 标准消息（过滤 thinking/tool_call 等展示性记录）
+        messages = _normalize_messages(messages)
 
         # 1. 视觉路由（如含图片）
         image_attachments = [a for a in attachments if a.get("type") == "image"]
