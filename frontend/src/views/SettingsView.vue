@@ -134,43 +134,8 @@
       </label>
     </section>
 
-    <!-- Skills -->
-    <section class="card">
-      <h2 class="card-title">Skills</h2>
-      <p class="hint">启用后，模型可在对话中调用对应技能。</p>
-      <div v-if="skills.length" class="skill-list">
-        <div v-for="s in skills" :key="s.name" class="skill-item">
-          <span class="skill-name">{{ s.name }}</span>
-          <span class="skill-desc">{{ s.description || '—' }}</span>
-          <label class="switch">
-            <input
-              type="checkbox"
-              :checked="!!s.enabled"
-              @change="onToggleSkill(s)"
-            />
-            <span>{{ s.enabled ? '已启用' : '已停用' }}</span>
-          </label>
-        </div>
-      </div>
-      <p v-else class="hint">未配置 skills。</p>
-    </section>
-
-    <!-- MCP -->
-    <section class="card">
-      <h2 class="card-title">MCP Servers</h2>
-      <div v-if="mcpServers.length" class="mcp-list">
-        <div v-for="s in mcpServers" :key="s.name" class="mcp-item">
-          <span class="skill-name">{{ s.name }}</span>
-          <span class="badge" :class="s.available ? 'ok' : 'err'">
-            {{ s.available ? '已连接' : '未连接' }}
-          </span>
-          <span class="skill-desc">
-            {{ s.available ? `${s.tool_count} 个工具` : '—' }}
-          </span>
-        </div>
-      </div>
-      <p v-else class="hint">未配置 MCP servers。</p>
-    </section>
+    <!-- 工具中心 -->
+    <ToolCenter />
 
     <!-- 代码执行 -->
     <section class="card">
@@ -215,6 +180,7 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
+import ToolCenter from '../components/ToolCenter.vue'
 import {
   getModels,
   saveModels,
@@ -222,9 +188,6 @@ import {
   saveSandbox,
   getModelCatalog,
   saveModelCatalog,
-  getSkills,
-  toggleSkill,
-  getMcpServers,
   runCode as execCode
 } from '../api'
 
@@ -247,8 +210,6 @@ const sandbox = reactive({ mode: 'sandbox' })
 const dockerText = ref('')
 const localText = ref('')
 const catalogText = ref('')
-const skills = ref([])
-const mcpServers = ref([])
 const codeInput = ref('')
 const codeResult = ref(null)
 
@@ -309,27 +270,11 @@ async function loadCatalog() {
   catalogText.value = JSON.stringify(data?.catalogs || {}, null, 2)
 }
 
-async function loadSkills() {
-  const data = await getSkills()
-  skills.value = data?.skills || []
-}
-
-async function loadMcp() {
-  const data = await getMcpServers()
-  mcpServers.value = data?.servers || []
-}
-
 async function loadAll() {
   loading.value = true
   notify('')
   try {
-    await Promise.all([
-      loadModels(),
-      loadSandboxCfg(),
-      loadCatalog(),
-      loadSkills(),
-      loadMcp()
-    ])
+    await Promise.all([loadModels(), loadSandboxCfg(), loadCatalog()])
     notify('已刷新')
   } catch (e) {
     notify('读取失败：' + e.message, 'err')
@@ -403,18 +348,6 @@ async function saveCatalog() {
     notify('保存目录失败：' + e.message, 'err')
   } finally {
     saving.value = false
-  }
-}
-
-/* ---------- Skills ---------- */
-async function onToggleSkill(s) {
-  const next = !s.enabled
-  try {
-    await toggleSkill(s.name, next)
-    s.enabled = next
-    notify(`Skill ${s.name} ${next ? '已启用' : '已停用'}`)
-  } catch (e) {
-    notify('切换失败：' + e.message, 'err')
   }
 }
 
@@ -519,49 +452,6 @@ onMounted(loadAll)
 
 .json-block {
   margin-top: 12px;
-}
-
-/* Skills */
-.skill-list,
-.mcp-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.skill-item,
-.mcp-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg);
-}
-
-.skill-name {
-  font-weight: 600;
-  font-size: 13px;
-  min-width: 120px;
-}
-
-.skill-desc {
-  flex: 1 1 auto;
-  color: var(--text-weak);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.switch {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-weak);
-  cursor: pointer;
 }
 
 /* 代码执行 */

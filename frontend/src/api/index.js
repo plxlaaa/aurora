@@ -22,9 +22,44 @@ export const saveSandbox = (payload) => http.put(base('/sandbox'), payload)
 // ---- Skills ----
 export const getSkills = () => http.get(base('/skills'))
 export const toggleSkill = (name, enabled) => http.put(base(`/skills/${name}`), { enabled })
+export const deleteSkill = (name) => http.del(base(`/skills/${encodeURIComponent(name)}`))
+export const uploadSkillZip = (file) => http.upload(base('/skills/upload'), file)
+export const getSkillFiles = (name) => http.get(base(`/skills/${encodeURIComponent(name)}/files`))
+export const readSkillFile = (name, path) =>
+  http.get(base(`/skills/${encodeURIComponent(name)}/files/${encodePath(path)}`))
+export const writeSkillFile = (name, path, content) =>
+  http.put(base(`/skills/${encodeURIComponent(name)}/files/${encodePath(path)}`), { content })
 
 // ---- MCP ----
 export const getMcpServers = () => http.get(base('/mcp'))
+export const getMcpServerConfigs = () => http.get(base('/mcp/servers'))
+export const createMcpServer = (cfg) => http.post(base('/mcp/servers'), cfg)
+export const updateMcpServer = (name, cfg) =>
+  http.put(base(`/mcp/servers/${encodeURIComponent(name)}`), cfg)
+export const deleteMcpServer = (name) => http.del(base(`/mcp/servers/${encodeURIComponent(name)}`))
+export const reconnectMcpServer = (name) =>
+  http.post(base(`/mcp/servers/${encodeURIComponent(name)}/reconnect`))
+
+// ---- 工具中心 ----
+export const getToolsSnapshot = () => http.get(base('/tools'))
+export const getCustomTools = () => http.get(base('/tools/custom'))
+export const getCustomTool = (name) => http.get(base(`/tools/custom/${encodeURIComponent(name)}`))
+export const createCustomTool = (tool) => http.post(base('/tools/custom'), tool)
+export const updateCustomTool = (name, tool) =>
+  http.put(base(`/tools/custom/${encodeURIComponent(name)}`), tool)
+export const deleteCustomTool = (name) => http.del(base(`/tools/custom/${encodeURIComponent(name)}`))
+export const toggleCustomTool = (name, enabled) =>
+  http.put(base(`/tools/custom/${encodeURIComponent(name)}/enabled`), { enabled })
+export const testCustomTool = (name, args) =>
+  http.post(base(`/tools/custom/${encodeURIComponent(name)}/test`), { arguments: args })
+
+// 文件路径按段编码，保留分隔符
+function encodePath(path) {
+  return String(path)
+    .split('/')
+    .map((seg) => encodeURIComponent(seg))
+    .join('/')
+}
 
 // ---- 附件 ----
 export const uploadImage = (file) => http.upload(base('/upload'), file)
@@ -57,7 +92,24 @@ export default {
   saveSandbox,
   getSkills,
   toggleSkill,
+  deleteSkill,
+  uploadSkillZip,
+  getSkillFiles,
+  readSkillFile,
+  writeSkillFile,
   getMcpServers,
+  getMcpServerConfigs,
+  createMcpServer,
+  updateMcpServer,
+  deleteMcpServer,
+  reconnectMcpServer,
+  getToolsSnapshot,
+  getCustomTools,
+  createCustomTool,
+  updateCustomTool,
+  deleteCustomTool,
+  toggleCustomTool,
+  testCustomTool,
   uploadImage,
   fileUrl,
   runCode,

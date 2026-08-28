@@ -6,9 +6,21 @@
 - PUT  /api/models          保存模型配置（热刷新）
 - GET  /api/sandbox         沙箱配置/状态
 - PUT  /api/sandbox         保存沙箱配置
+- GET  /api/tools           工具中心快照（内置/skill/custom 分组）
+- GET/POST  /api/tools/custom          自定义工具列表 / 创建
+- GET/PUT/DELETE /api/tools/custom/{name} 详情 / 更新 / 删除
+- PUT  /api/tools/custom/{name}/enabled 启停
+- POST /api/tools/custom/{name}/test   测试运行
 - GET  /api/skills          Skills 列表
 - PUT  /api/skills/{name}   启停 skill
+- POST /api/skills/upload   zip 导入 skill
+- GET  /api/skills/{name}/files      文件树
+- GET/PUT /api/skills/{name}/files/{path} 读 / 保存文本文件
+- DELETE /api/skills/{name} 删除 skill
 - GET  /api/mcp             MCP server 状态
+- GET/POST /api/mcp/servers        server 配置列表 / 新增
+- PUT/DELETE /api/mcp/servers/{name} 更新（含重连）/ 删除
+- POST /api/mcp/servers/{name}/reconnect 手动重连
 - GET  /api/models/catalog  模型目录
 - POST /api/upload          附件上传
 - GET  /api/files/{id}      附件读取
@@ -36,7 +48,20 @@ from fastapi.responses import Response
 from ..core import auth
 from ..services.upload import UploadError, load_object_with_mime, save_upload
 
-from .deps import compressor, executor, logger, mcp_mgr, pipeline, registry, sessions, settings, skills_mgr, vision
+from .deps import (
+    compressor,
+    custom_tools,
+    executor,
+    logger,
+    mcp_mgr,
+    pipeline,
+    registry,
+    sessions,
+    settings,
+    skills_mgr,
+    tool_registry,
+    vision,
+)
 
 router = APIRouter()
 
@@ -129,6 +154,236 @@ async def toggle_skill(
     if not skills_mgr.set_enabled(name, bool(payload["enabled"])):
         raise HTTPException(status_code=404, detail=f"skill 不存在: {name}")
     return {"ok": True}
+
+
+@router.delete("/api/skills/{name}")
+async def delete_skill(name: str, _: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
+    if not skills_mgr.delete(name):
+        raise HTTPException(status_code=404, detail=f"skill 不存在: {name}")
+    return {"ok": True}
+
+
+@router.post("/api/skills/upload")
+async def upload_skill(
+    file: UploadFile, _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
+    data = await file.read()
+    try:
+        result = skills_mgr.import_zip(data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, **result}
+
+
+@router.get("/api/skills/{name}/files")
+async def skill_files(name: str, _: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
+    try:
+        return {"files": skills_mgr.list_files(name)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/api/skills/{name}/files/{path:path}")
+async def skill_read_file(
+    name: str, path: str, _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
+    try:
+        return {"path": path, "content": skills_mgr.read_file(name, path)}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/api/skills/{name}/files/{path:path}")
+async def skill_write_file(
+    name: str, path: str, payload: dict[str, Any], _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
+    content = payload.get("content")
+    if not isinstance(content, str):
+        raise HTTPException(status_code=400, detail="缺少 content 字段")
+    try:
+        skills_mgr.write_file(name, path, content)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+# ---------- 工具中心 ----------
+@router.get("/api/tools")
+async def list_tools(_: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
+    return tool_registry.snapshot()
+
+
+@router.get("/api/tools/custom")
+async def list_custom_tools(_: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
+    return {"tools": custom_tools.list()}
+
+
+@router.get("/api/tools/custom/{name}")
+async def get_custom_tool(
+    name: str, _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
+    tool = custom_tools.get(name)
+    if tool is None:
+        raise HTTPException(status_code=404, detail=f"工具不存在: {name}")
+    return {"tool": tool}
+
+
+def _validate_custom_name(name: str) -> None:
+    if name in ("read_skill", "run_skill", "run_code") or name.startswith("mcp_"):
+        raise HTTPException(status_code=400, detail=f"工具名与内置/MCP 命名空间冲突: {name}")
+    if tool_registry.name_exists(name):
+        raise HTTPException(status_code=400, detail=f"工具名已存在: {name}")
+
+
+@router.post("/api/tools/custom")
+async def create_custom_tool(
+    payload: dict[str, Any], _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
+    name = str(payload.get("name", ""))
+    _validate_custom_name(name)
+    try:
+        custom_tools.save(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, "name": name}
+
+
+@router.put("/api/tools/custom/{name}")
+async def update_custom_tool(
+    name: str, payload: dict[str, Any], _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
+    if custom_tools.get(name) is None:
+        raise HTTPException(status_code=404, detail=f"工具不存在: {name}")
+    payload["name"] = name
+    try:
+        custom_tools.save(payload, overwrite=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@router.delete("/api/tools/custom/{name}")
+async def delete_custom_tool(
+    name: str, _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
+    if not custom_tools.delete(name):
+        raise HTTPException(status_code=404, detail=f"工具不存在: {name}")
+    return {"ok": True}
+
+
+@router.put("/api/tools/custom/{name}/enabled")
+async def toggle_custom_tool(
+    name: str, payload: dict[str, Any], _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
+    if "enabled" not in payload:
+        raise HTTPException(status_code=400, detail="缺少 enabled 字段")
+    if not custom_tools.set_enabled(name, bool(payload["enabled"])):
+        raise HTTPException(status_code=404, detail=f"工具不存在: {name}")
+    return {"ok": True}
+
+
+@router.post("/api/tools/custom/{name}/test")
+async def test_custom_tool(
+    name: str, payload: dict[str, Any], _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
+    tool = custom_tools.get(name)
+    if tool is None:
+        raise HTTPException(status_code=404, detail=f"工具不存在: {name}")
+    arguments = payload.get("arguments") or {}
+    if not isinstance(arguments, dict):
+        raise HTTPException(status_code=400, detail="arguments 必须为对象")
+    if tool["type"] == "http":
+        result = await custom_tools._run_http(tool, arguments)
+    else:
+        result = await custom_tools._run_python(tool, arguments)
+    return {"result": result}
+
+
+# ---------- MCP server 管理 ----------
+@router.get("/api/mcp/servers")
+async def list_mcp_servers(_: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
+    return {"servers": settings.mcp_servers()}
+
+
+def _validate_mcp_cfg(cfg: dict[str, Any]) -> None:
+    name = str(cfg.get("name", "")).strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="缺少 name 字段")
+    transport = cfg.get("transport", "stdio")
+    if transport not in ("stdio", "http", "sse"):
+        raise HTTPException(status_code=400, detail=f"不支持的 transport: {transport}")
+    if transport == "stdio" and not str(cfg.get("command", "")).strip():
+        raise HTTPException(status_code=400, detail="stdio 传输必须提供 command")
+    if transport in ("http", "sse") and not str(cfg.get("url", "")).strip():
+        raise HTTPException(status_code=400, detail=f"{transport} 传输必须提供 url")
+    cfg["name"] = name
+
+
+@router.post("/api/mcp/servers")
+async def create_mcp_server(
+    payload: dict[str, Any], _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
+    _validate_mcp_cfg(payload)
+    name = payload["name"]
+    servers = settings.mcp_servers()
+    if any(s.get("name") == name for s in servers):
+        raise HTTPException(status_code=400, detail=f"MCP server 已存在: {name}")
+    servers.append(payload)
+    settings.update("mcp", {"servers": servers})
+    mcp_mgr.upsert(payload)
+    status = await mcp_mgr.connect_one(name)
+    return {"ok": True, "status": status}
+
+
+@router.put("/api/mcp/servers/{name}")
+async def update_mcp_server(
+    name: str, payload: dict[str, Any], _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
+    servers = settings.mcp_servers()
+    idx = next((i for i, s in enumerate(servers) if s.get("name") == name), None)
+    if idx is None:
+        raise HTTPException(status_code=404, detail=f"MCP server 不存在: {name}")
+    payload["name"] = name
+    _validate_mcp_cfg(payload)
+    servers[idx] = payload
+    settings.update("mcp", {"servers": servers})
+    mcp_mgr.upsert(payload)
+    status = await mcp_mgr.connect_one(name) if payload.get("enabled", True) else f"{name}(已禁用)"
+    return {"ok": True, "status": status}
+
+
+@router.delete("/api/mcp/servers/{name}")
+async def delete_mcp_server(
+    name: str, _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
+    servers = settings.mcp_servers()
+    remaining = [s for s in servers if s.get("name") != name]
+    if len(remaining) == len(servers):
+        raise HTTPException(status_code=404, detail=f"MCP server 不存在: {name}")
+    settings.update("mcp", {"servers": remaining})
+    handle = mcp_mgr.remove(name)
+    if handle is not None:
+        await mcp_mgr.close_handle(handle)
+    return {"ok": True}
+
+
+@router.post("/api/mcp/servers/{name}/reconnect")
+async def reconnect_mcp_server(
+    name: str, _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
+    if not any(s.get("name") == name for s in settings.mcp_servers()):
+        raise HTTPException(status_code=404, detail=f"MCP server 不存在: {name}")
+    if mcp_mgr.get_handle(name) is None:
+        for cfg in settings.mcp_servers():
+            if cfg.get("name") == name:
+                mcp_mgr.upsert(cfg)
+                break
+    status = await mcp_mgr.connect_one(name)
+    return {"ok": True, "status": status}
 
 
 @router.get("/api/mcp")

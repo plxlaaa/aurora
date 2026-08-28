@@ -239,6 +239,13 @@ let reconnectDelay = 1000
 // 连接尚未就绪时暂存的待发送指令
 let outbox = []
 
+// 打字机队列：网络分块先入缓冲，定时器匀速吐字，缓冲越大吐字越快以便追赶
+let typeBuffer = ''
+let typeTimer = null
+let typingMsg = null
+let typeEnded = false
+const TYPE_TICK_MS = 24
+
 const lastMessageId = computed(() =>
   messages.value.length ? messages.value[messages.value.length - 1].id : null
 )
@@ -372,6 +379,7 @@ function connectWS(sessionId) {
   socket.onclose = () => {
     wsState.value = 'disconnected'
     streaming.value = false
+    resetTyping()
     socketSessionId = null
     socket = null
     if (!manualClose && currentSessionId.value) {
@@ -441,12 +449,12 @@ function handleMessage(raw) {
       notify(data.text || '', 'ok')
       break
     case 'error':
-      streaming.value = false
+      endStreaming()
       finishPendingTools()
       messages.value.push({ id: nextId(), role: 'error', content: data.message || '未知错误' })
       break
     case 'cancelled':
-      streaming.value = false
+      endStreaming()
       finishPendingTools()
       messages.value.push({ id: nextId(), role: 'info', content: '已停止生成' })
       loadSessions()
@@ -454,7 +462,7 @@ function handleMessage(raw) {
     case 'done':
     case 'end':
     case 'finished':
-      streaming.value = false
+      endStreaming()
       finishPendingTools()
       loadSessions()
       break
@@ -476,8 +484,64 @@ function appendDelta(text) {
   if (!text) return
   streaming.value = true
   const last = messages.value[messages.value.length - 1]
-  if (last && last.role === 'assistant') last.content += text
-  else messages.value.push({ id: nextId(), role: 'assistant', content: text })
+  if (last && last.role === 'assistant') {
+    typingMsg = last
+  } else {
+    typingMsg = { id: nextId(), role: 'assistant', content: '' }
+    messages.value.push(typingMsg)
+  }
+  typeBuffer += text
+  if (!typeTimer) {
+    typeEnded = false
+    typeTimer = setInterval(typeTick, TYPE_TICK_MS)
+  }
+}
+
+function stopTypeTimer() {
+  if (typeTimer) {
+    clearInterval(typeTimer)
+    typeTimer = null
+  }
+}
+
+/* 排空缓冲后正常收尾 */
+function finishTyping() {
+  stopTypeTimer()
+  typeBuffer = ''
+  typingMsg = null
+  typeEnded = false
+  streaming.value = false
+}
+
+/* 丢弃缓冲（切换会话/连接断开时调用） */
+function resetTyping() {
+  stopTypeTimer()
+  typeBuffer = ''
+  typingMsg = null
+  typeEnded = false
+}
+
+/* 生成结束：等缓冲排空再收尾，避免结尾文字瞬间蹦出 */
+function endStreaming() {
+  typeEnded = true
+  if (!typeTimer || !typeBuffer) finishTyping()
+}
+
+function typeTick() {
+  // 目标消息已被切换会话/重新生成移除时直接终止
+  if (!typingMsg || !messages.value.includes(typingMsg)) {
+    resetTyping()
+    return
+  }
+  if (!typeBuffer) {
+    if (typeEnded) finishTyping()
+    else stopTypeTimer()
+    return
+  }
+  const n = Math.max(2, Math.ceil(typeBuffer.length / 20))
+  typingMsg.content += typeBuffer.slice(0, n)
+  typeBuffer = typeBuffer.slice(n)
+  scrollToBottom()
 }
 
 function appendThinking(text) {
@@ -542,6 +606,7 @@ function stop() {
     socket.send(JSON.stringify({ type: 'cancel' }))
   } else {
     streaming.value = false
+    resetTyping()
   }
 }
 
@@ -597,6 +662,7 @@ async function switchSession(id) {
   closeSocket()
   currentSessionId.value = id
   streaming.value = false
+  resetTyping()
   messages.value = []
   atBottom.value = true
   try {

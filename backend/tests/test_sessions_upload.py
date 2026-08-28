@@ -54,8 +54,13 @@ class TestSessionStore(unittest.TestCase):
         self.assertEqual(entry["title"], "hi")
 
     def test_list_sorted_by_update_time(self):
+        import os
+
         first = self.store.create()
         second = self.store.create()
+        # 显式设置不同 mtime，避免同一时钟刻度内创建导致排序不稳定
+        os.utime(self.store._path(first), (2000, 2000))
+        os.utime(self.store._path(second), (1000, 1000))
         self.store.append(first, {"role": "user", "content": "later"})
         ids = [s["id"] for s in self.store.list_sessions()]
         self.assertEqual(ids[0], first)

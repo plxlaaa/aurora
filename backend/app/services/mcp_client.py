@@ -92,6 +92,7 @@ class MCPManager:
     def __init__(self, settings) -> None:
         self._settings = settings
         self._handles: dict[str, MCPServerHandle] = {}
+        self._pending_close: list[MCPServerHandle] = []
         self.reload()
 
     def reload(self) -> None:
@@ -105,14 +106,55 @@ class MCPManager:
             new_handles[name] = MCPServerHandle(name, cfg)
         self._handles = new_handles
 
+    def _http_timeout(self) -> float:
+        return float(self._settings.raw("mcp").get("http", {}).get("timeout", 15))
+
+    async def connect_one(self, name: str) -> str:
+        """连接（或重连）单个 server；返回状态描述字符串。"""
+        handle = self._handles.get(name)
+        if handle is None:
+            return f"{name}(未配置或未启用)"
+        await handle.close()
+        try:
+            await handle.connect(http_timeout=self._http_timeout())
+            return f"{name}({len(handle.tools)} tools)"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("MCP server %s 连接失败: %s", name, exc)
+            return f"{name}(failed: {exc})"
+
+    def upsert(self, cfg: dict[str, Any]) -> None:
+        """新增或更新单个 server 配置（仅内存句柄，持久化由 Settings 负责）。"""
+        name = cfg.get("name")
+        if not name:
+            raise ValueError("MCP server 配置缺少 name")
+        old = self._handles.get(name)
+        if old is not None:
+            self._pending_close.append(old)
+        handle = MCPServerHandle(name, cfg)
+        if not cfg.get("enabled", True):
+            # 禁用状态：句柄不入注册表
+            if old is None:
+                return
+            del self._handles[name]
+            return
+        self._handles[name] = handle
+
+    def remove(self, name: str) -> MCPServerHandle | None:
+        """移除 server 句柄并返回（由调用方决定是否关闭连接）。"""
+        return self._handles.pop(name, None)
+
+    def get_handle(self, name: str) -> MCPServerHandle | None:
+        return self._handles.get(name)
+
+    async def close_handle(self, handle: MCPServerHandle) -> None:
+        await handle.close()
+
     async def connect_all(self) -> list[str]:
         """连接所有启用的 server，返回成功连接的工具计数摘要。"""
         results: list[str] = []
         for name, handle in self._handles.items():
             try:
-                await handle.connect(
-                    http_timeout=self._settings.raw("mcp").get("http", {}).get("timeout", 15)
-                )
+                await handle.connect(http_timeout=self._http_timeout())
                 results.append(f"{name}({len(handle.tools)} tools)")
             except Exception as exc:  # noqa: BLE001
                 logger.warning("MCP server %s 连接失败: %s", name, exc)
@@ -121,6 +163,9 @@ class MCPManager:
 
     async def close_all(self) -> None:
         for handle in self._handles.values():
+            await handle.close()
+        pending, self._pending_close = self._pending_close, []
+        for handle in pending:
             await handle.close()
 
     def list(self) -> list[dict[str, Any]]:

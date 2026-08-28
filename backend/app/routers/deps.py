@@ -1,7 +1,8 @@
 """FastAPI 网关全局依赖（单例注册与生命周期）。
 
 提供进程级共享单例（settings / registry / vision / compressor / skills_mgr /
-mcp_mgr / executor / sessions / pipeline），以及应用启动 / 关闭钩子。
+mcp_mgr / executor / custom_tools / tool_registry / sessions / pipeline），
+以及应用启动 / 关闭钩子。
 """
 from __future__ import annotations
 
@@ -11,11 +12,13 @@ from ..core import auth
 from ..core.config import settings
 from ..services.chat import ChatPipeline
 from ..services.compress import ContextCompressor
+from ..services.custom_tools import CustomToolsManager
 from ..services.llm import ModelRegistry
 from ..services.mcp_client import MCPManager
 from ..services.sandbox import Executor
 from ..services.sessions import SessionStore
 from ..services.skills import SkillsManager
+from ..services.tool_registry import ToolRegistry
 from ..services.vision import VisionRouter
 
 logging.basicConfig(
@@ -32,11 +35,10 @@ compressor = ContextCompressor(settings, registry)
 skills_mgr = SkillsManager(executor=None)
 mcp_mgr = MCPManager(settings)
 executor = Executor(settings)
+custom_tools = CustomToolsManager(settings.config_dir, executor=executor)
+tool_registry = ToolRegistry(skills_mgr, mcp_mgr, custom_tools, executor=executor)
 sessions = SessionStore()
-pipeline = ChatPipeline(registry, vision, compressor, skills_mgr, mcp_mgr)
-
-# skills 的执行器与 sandbox 保持一致
-skills_mgr.executor = executor
+pipeline = ChatPipeline(registry, vision, compressor, tool_registry)
 
 
 async def startup() -> None:
