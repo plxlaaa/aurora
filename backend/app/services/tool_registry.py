@@ -37,13 +37,21 @@ class ToolRegistry:
         self.mcp = mcp
         self.custom = custom
         self.executor = executor
+        self._tools_cache: dict[str, Any] | None = None
 
     # -- function definitions --
     def collect_tools(self) -> list[dict[str, Any]]:
+        if self._tools_cache is not None:
+            return self._tools_cache
         defs: list[dict[str, Any]] = [self._builtin_definitions()[n] for n in BUILTIN_TOOL_NAMES]
         defs += self.custom.function_definitions()
         defs += self.mcp.function_definitions()
+        self._tools_cache = defs
         return defs
+
+    def invalidate_tools_cache(self) -> None:
+        """在工具配置变更后调用，以便下次调用 collect_tools 时重新构建。"""
+        self._tools_cache = None
 
     @staticmethod
     def _builtin_definitions() -> dict[str, dict[str, Any]]:
@@ -161,6 +169,9 @@ class ToolRegistry:
 
     # -- 前端快照 --
     def snapshot(self) -> dict[str, Any]:
+        # 使用已缓存的 tools 列表（若有）
+        if self._tools_cache is None:
+            self.collect_tools()
         builtin = self._builtin_definitions()
         items = [
             {

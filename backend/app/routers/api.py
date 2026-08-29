@@ -153,6 +153,7 @@ async def toggle_skill(
         raise HTTPException(status_code=400, detail="缺少 enabled 字段")
     if not skills_mgr.set_enabled(name, bool(payload["enabled"])):
         raise HTTPException(status_code=404, detail=f"skill 不存在: {name}")
+    tool_registry.invalidate_tools_cache()
     return {"ok": True}
 
 
@@ -160,6 +161,7 @@ async def toggle_skill(
 async def delete_skill(name: str, _: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
     if not skills_mgr.delete(name):
         raise HTTPException(status_code=404, detail=f"skill 不存在: {name}")
+    tool_registry.invalidate_tools_cache()
     return {"ok": True}
 
 
@@ -172,6 +174,7 @@ async def upload_skill(
         result = skills_mgr.import_zip(data)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    tool_registry.invalidate_tools_cache()
     return {"ok": True, **result}
 
 
@@ -249,6 +252,7 @@ async def create_custom_tool(
         custom_tools.save(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    tool_registry.invalidate_tools_cache()
     return {"ok": True, "name": name}
 
 
@@ -263,6 +267,7 @@ async def update_custom_tool(
         custom_tools.save(payload, overwrite=True)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    tool_registry.invalidate_tools_cache()
     return {"ok": True}
 
 
@@ -272,6 +277,7 @@ async def delete_custom_tool(
 ) -> dict[str, Any]:
     if not custom_tools.delete(name):
         raise HTTPException(status_code=404, detail=f"工具不存在: {name}")
+    tool_registry.invalidate_tools_cache()
     return {"ok": True}
 
 
@@ -283,6 +289,7 @@ async def toggle_custom_tool(
         raise HTTPException(status_code=400, detail="缺少 enabled 字段")
     if not custom_tools.set_enabled(name, bool(payload["enabled"])):
         raise HTTPException(status_code=404, detail=f"工具不存在: {name}")
+    tool_registry.invalidate_tools_cache()
     return {"ok": True}
 
 
@@ -335,6 +342,7 @@ async def create_mcp_server(
     servers.append(payload)
     settings.update("mcp", {"servers": servers})
     mcp_mgr.upsert(payload)
+    tool_registry.invalidate_tools_cache()
     status = await mcp_mgr.connect_one(name)
     return {"ok": True, "status": status}
 
@@ -352,6 +360,7 @@ async def update_mcp_server(
     servers[idx] = payload
     settings.update("mcp", {"servers": servers})
     mcp_mgr.upsert(payload)
+    tool_registry.invalidate_tools_cache()
     status = await mcp_mgr.connect_one(name) if payload.get("enabled", True) else f"{name}(已禁用)"
     return {"ok": True, "status": status}
 
@@ -365,9 +374,8 @@ async def delete_mcp_server(
     if len(remaining) == len(servers):
         raise HTTPException(status_code=404, detail=f"MCP server 不存在: {name}")
     settings.update("mcp", {"servers": remaining})
-    handle = mcp_mgr.remove(name)
-    if handle is not None:
-        await mcp_mgr.close_handle(handle)
+    mcp_mgr.remove(name)
+    tool_registry.invalidate_tools_cache()
     return {"ok": True}
 
 
@@ -536,6 +544,9 @@ async def login(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------- WebSocket ----------
+_attach_data_cache: dict[str, tuple[bytes, str]] = {}
+
+
 def _resolve_attachments(attachments: list[Any]) -> list[dict[str, Any]]:
     """将附件引用解析为可送入视觉路由的 image 结构（仅接受图片）。"""
     resolved: list[dict[str, Any]] = []
@@ -545,16 +556,20 @@ def _resolve_attachments(attachments: list[Any]) -> list[dict[str, Any]]:
             # 前端只给了引用（object_id/id），同样需要网关侧读盘
             object_id = att.get("object_id") or att.get("id")
         if object_id:
-            found = load_object_with_mime(object_id)
-            if found is None:
-                continue
-            data, mime = found
+            if object_id not in _attach_data_cache:
+                found = load_object_with_mime(object_id)
+                if found is None:
+                    continue
+                data, mime = found
+                _attach_data_cache[object_id] = (data, mime)
+            data, mime = _attach_data_cache[object_id]
             resolved.append({
                 "type": "image",
                 "object_id": object_id,
                 "mime_type": mime,
                 "base64": base64.b64encode(data).decode("utf-8"),
             })
+            continue
         elif isinstance(att, dict) and att.get("type") == "image":
             resolved.append(att)
     return resolved

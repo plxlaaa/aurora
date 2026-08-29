@@ -35,6 +35,9 @@ class SessionStore:
         self._titles: dict[str, str] = {}
         self._titles_path = self.data_dir / "_titles.json"
         self._load_titles()
+        # 会话列表缓存：{session_id: session_info}，在会话变更时失效
+        self._session_cache: dict[str, dict[str, Any]] = {}
+        self._cache_valid = False
 
     def _load_status(self) -> None:
         if self._status_path.exists():
@@ -82,6 +85,7 @@ class SessionStore:
             else:
                 self._titles.pop(session_id, None)
             self._save_titles()
+            self._cache_valid = False
 
     def set_status(self, session_id: str, status: str) -> None:
         with self._lock:
@@ -105,11 +109,12 @@ class SessionStore:
 
     def create(self) -> str:
         """创建会话并立即落盘空文件，确保新会话在列表中可见。"""
-        sid = uuid.uuid4().hex[:24]
         with self._lock:
+            sid = uuid.uuid4().hex[:24]
             self._path(sid).touch(exist_ok=True)
             self._status[sid] = self.STATUS_IDLE
             self._save_status()
+            self._cache_valid = False
         return sid
 
     def exists(self, session_id: str) -> bool:
@@ -121,6 +126,7 @@ class SessionStore:
             path = self._path(session_id)
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(message, ensure_ascii=False) + "\n")
+            self._cache_valid = False
 
     def append_stream(self, session_id: str, role: str, text: str) -> None:
         """追加流式增量：合并进末尾的同 role 记录，避免 JSONL 行数爆炸。"""
@@ -132,11 +138,13 @@ class SessionStore:
             if messages and messages[-1].get("role") == role:
                 messages[-1]["content"] = (messages[-1].get("content") or "") + text
                 self.save(session_id, messages)
+                self._cache_valid = False
                 return
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(
                     json.dumps({"role": role, "content": text}, ensure_ascii=False) + "\n"
                 )
+            self._cache_valid = False
 
     def collapse_deltas(self, session_id: str) -> None:
         """一轮生成结束后，将连续的 assistant_delta 合并为单条 assistant 消息。"""
@@ -157,6 +165,7 @@ class SessionStore:
             for msg in merged:
                 msg.pop("_from_delta", None)
             self.save(session_id, merged)
+            self._cache_valid = False
 
     def load(self, session_id: str) -> list[dict[str, Any]]:
         with self._lock:
@@ -181,6 +190,7 @@ class SessionStore:
             path = self._path(session_id)
             if path.exists():
                 path.write_text("", encoding="utf-8")
+            self._cache_valid = False
 
     def delete(self, session_id: str) -> bool:
         """彻底删除会话文件与附属状态；返回会话此前是否存在。"""
@@ -193,6 +203,7 @@ class SessionStore:
             self._titles.pop(path.stem, None)
             self._save_status()
             self._save_titles()
+            self._cache_valid = False
             return existed
 
     def save(self, session_id: str, messages: list[dict[str, Any]]) -> None:
@@ -201,6 +212,7 @@ class SessionStore:
             with open(path, "w", encoding="utf-8") as fh:
                 for msg in messages:
                     fh.write(json.dumps(msg, ensure_ascii=False) + "\n")
+            self._cache_valid = False
 
     def archive(self, session_id: str) -> Path | None:
         """将会话文件移动到 archive 子目录，返回目标路径；会话不存在时返回 None。"""
@@ -214,11 +226,16 @@ class SessionStore:
             path.replace(dest)
             self._status.pop(path.stem, None)
             self._save_status()
+            self._cache_valid = False
             return dest
 
-    def list_sessions(self) -> list[dict[str, Any]]:
-        """返回会话列表，按最后更新时间倒序（最新在前）。"""
+    def _get_cached_session_list(self) -> list[dict[str, Any]]:
+        """使用缓存获取会话列表，如果缓失效则重新构建。"""
         with self._lock:
+            if self._cache_valid and self._session_cache:
+                return list(self._session_cache.values())
+            # 重新构建缓存
+            self._session_cache = {}
             sessions = []
             for path in self.data_dir.glob("*.jsonl"):
                 # 一次遍历同时提取首条 user 消息标题与可见消息计数
@@ -245,16 +262,25 @@ class SessionStore:
                 except OSError:
                     continue
                 stat = path.stat()
-                sessions.append(
-                    {
-                        "id": path.stem,
-                        "title": self._titles.get(path.stem) or preview or "新会话",
-                        "message_count": count,
-                        "status": self.get_status(path.stem),
-                        "created_at": dt.datetime.fromtimestamp(stat.st_ctime, tz=dt.timezone.utc).isoformat(),
-                        "updated_at": dt.datetime.fromtimestamp(stat.st_mtime, tz=dt.timezone.utc).isoformat(),
-                        "mtime": stat.st_mtime,
-                    }
-                )
-            sessions.sort(key=lambda s: s.pop("mtime"), reverse=True)
-            return sessions
+                session_id = path.stem
+                self._session_cache[session_id] = {
+                    "id": session_id,
+                    "title": self._titles.get(session_id) or preview or "新会话",
+                    "message_count": count,
+                    "status": self.get_status(session_id),
+                    "created_at": dt.datetime.fromtimestamp(stat.st_ctime, tz=dt.timezone.utc).isoformat(),
+                    "updated_at": dt.datetime.fromtimestamp(stat.st_mtime, tz=dt.timezone.utc).isoformat(),
+                    "mtime": stat.st_mtime,
+                }
+            self._cache_valid = True
+            return list(self._session_cache.values())
+
+    def list_sessions(self) -> list[dict[str, Any]]:
+        """返回会话列表，按最后更新时间倒序（最新在前）。"""
+        with self._lock:
+            sessions = self._get_cached_session_list()
+            sessions.sort(key=lambda s: s["mtime"], reverse=True)
+            # 复制并移除 mtime，避免污染缓存
+            return [
+                {k: v for k, v in s.items() if k != "mtime"} for s in sessions
+            ]
