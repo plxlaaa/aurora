@@ -28,6 +28,8 @@ class EndpointInfo:
     enabled: bool = True
     detected_modality: str | None = None  # 能力探测结果
     available: bool = False
+    models: list[str] = field(default_factory=list)  # 探测到的可用模型 id
+    error: str = ""                                  # 最近一次探测失败原因
 
 
 def _build_client(base_url: str, api_key: str) -> httpx.AsyncClient:

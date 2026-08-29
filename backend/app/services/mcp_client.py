@@ -200,14 +200,21 @@ class MCPManager:
         return defs
 
     async def dispatch(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """按 'mcp_<server>_<tool>' 命名解析并调用。"""
+        """按 'mcp_<server>_<tool>' 命名解析并调用。
+
+        server 名自身可能含下划线，因此不能按固定位置切分；改为在已注册的
+        server 名中做最长前缀匹配，避免 mcp_my_server_do 被误解析为 server=my。
+        """
         if not tool_name.startswith("mcp_"):
             raise KeyError(f"非 MCP 工具: {tool_name}")
-        parts = tool_name.split("_", 2)
-        if len(parts) != 3:
-            raise KeyError(f"非法 MCP 工具名: {tool_name}")
-        _, server_name, tool = parts
-        handle = self._handles.get(server_name)
-        if handle is None:
-            raise KeyError(f"MCP server 不存在: {server_name}")
-        return await handle.call_tool(tool, arguments)
+        rest = tool_name[len("mcp_"):]
+        matched: str | None = None
+        for name in self._handles:
+            prefix = f"{name}_"
+            if rest.startswith(prefix) and len(rest) > len(prefix):
+                if matched is None or len(name) > len(matched):
+                    matched = name
+        if matched is None:
+            raise KeyError(f"MCP server 不存在: {tool_name}")
+        tool = rest[len(matched) + 1:]
+        return await self._handles[matched].call_tool(tool, arguments)

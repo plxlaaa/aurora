@@ -5,7 +5,9 @@
 """
 from __future__ import annotations
 
+import copy
 import os
+import tempfile
 import threading
 from typing import Any
 
@@ -36,8 +38,9 @@ class Settings:
 
     # -- 通用访问 --
     def raw(self, name: str) -> dict[str, Any]:
+        """返回配置段的深拷贝，避免调用方原地修改污染内存配置。"""
         with self._lock:
-            return self._data.get(name, {})
+            return copy.deepcopy(self._data.get(name, {}))
 
     # -- 模型配置 --
     def endpoints(self) -> dict[str, Any]:
@@ -61,11 +64,24 @@ class Settings:
         return self.raw("mcp").get("servers", [])
 
     def update(self, name: str, data: dict[str, Any]) -> None:
-        """将内存中的配置更新写回对应 YAML 文件并热刷新。"""
+        """将配置更新原子写回对应 YAML 并热刷新。
+
+        先写同目录临时文件再 os.replace，避免写入中途失败留下截断的配置文件。
+        """
         path = os.path.join(self.config_dir, f"{name}.yaml")
         with self._lock:
-            with open(path, "w", encoding="utf-8") as fh:
-                yaml.safe_dump(data, fh, allow_unicode=True, sort_keys=False)
+            os.makedirs(self.config_dir, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(dir=self.config_dir, prefix=f".{name}.", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    yaml.safe_dump(data, fh, allow_unicode=True, sort_keys=False)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp_path, path)
+            except Exception:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                raise
             self.reload()
 
 

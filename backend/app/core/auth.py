@@ -14,7 +14,23 @@ import time
 import uuid
 
 API_KEY = os.environ.get("AI_ASSISTANT_API_KEY", "")
-JWT_SECRET = os.environ.get("AI_ASSISTANT_JWT_SECRET", uuid.uuid4().hex)
+
+
+def _resolve_secret() -> str:
+    """解析 JWT 签名密钥，保证进程重启后已签发的 token 仍然有效。
+
+    优先级：显式配置的 AI_ASSISTANT_JWT_SECRET > 由 API Key 确定性派生 >
+    随机值（此时鉴权本就关闭，token 无实际用途）。
+    """
+    explicit = os.environ.get("AI_ASSISTANT_JWT_SECRET", "")
+    if explicit:
+        return explicit
+    if API_KEY:
+        return hashlib.sha256(f"aurora-jwt:{API_KEY}".encode("utf-8")).hexdigest()
+    return uuid.uuid4().hex
+
+
+JWT_SECRET = _resolve_secret()
 JWT_TTL = 24 * 3600
 
 # WebSocket 握手与 REST 均走同一检查；JWT 采用 HS256 手写实现，避免额外依赖

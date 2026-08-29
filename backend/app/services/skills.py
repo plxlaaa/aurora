@@ -15,7 +15,7 @@ import logging
 import os
 import re
 import shutil
-import time
+import uuid
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -235,7 +235,8 @@ class SkillsManager:
         target = self.skills_dir / skill_name
         backup = None
         if target.exists():
-            backup = self.skills_dir / f".bak-{skill_name}-{int(time.time())}"
+            # 用唯一后缀而非秒级时间戳，避免同一秒内重复导入时备份互相覆盖
+            backup = self.skills_dir / f".bak-{skill_name}-{uuid.uuid4().hex[:8]}"
             target.rename(backup)
 
         files_written = 0
