@@ -77,6 +77,62 @@ class TestParseReactCalls(unittest.TestCase):
     def test_no_marker(self):
         self.assertEqual(parse_react_calls("普通回复，没有调用。"), [])
 
+    def test_multiline_arguments(self):
+        text = '<tool_call>{\n  "name": "run_code",\n  "arguments": {"code": "print(1)"}\n}</tool_call>'
+        calls = parse_react_calls(text)
+        self.assertEqual(calls[0]["function"]["name"], "run_code")
+
+    def test_markdown_fence_inside_marker(self):
+        text = (
+            '<tool_call>\n```json\n'
+            '{"name": "run_code", "arguments": {"code": "print(6*7)"}}\n'
+            "```\n</tool_call>"
+        )
+        calls = parse_react_calls(text)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["function"]["name"], "run_code")
+        self.assertEqual(json.loads(calls[0]["function"]["arguments"]), {"code": "print(6*7)"})
+
+    def test_tag_case_and_underscore_variants(self):
+        for opening, closing in (
+            ("<ToolCall>", "</ToolCall>"),
+            ("<toolcall>", "</toolcall>"),
+            ("< tool_call >", "< / tool_call >"),
+        ):
+            text = f'{opening}{{"name": "run_code", "arguments": {{}}}}{closing}'
+            calls = parse_react_calls(text)
+            self.assertEqual(len(calls), 1, opening)
+            self.assertEqual(calls[0]["function"]["name"], "run_code")
+
+    def test_arguments_double_encoded_string(self):
+        text = (
+            '<tool_call>{"name": "run_code", "arguments": '
+            '"{\\"code\\": \\"print(1)\\"}"}</tool_call>'
+        )
+        calls = parse_react_calls(text)
+        self.assertEqual(json.loads(calls[0]["function"]["arguments"]), {"code": "print(1)"})
+
+    def test_key_name_variants(self):
+        cases = [
+            ('{"tool": "run_code", "arguments": {}}', "run_code"),
+            ('{"tool_name": "run_code", "args": {"code": "print(1)"}}', "run_code"),
+            ('{"name": "run_code", "parameters": {}}', "run_code"),
+        ]
+        for raw, expected in cases:
+            text = f"<tool_call>{raw}</tool_call>"
+            calls = parse_react_calls(text)
+            self.assertEqual(len(calls), 1, raw)
+            self.assertEqual(calls[0]["function"]["name"], expected)
+
+    def test_openai_function_shape(self):
+        text = (
+            '<tool_call>{"type": "function", "function": '
+            '{"name": "run_code", "arguments": "{\\"code\\": \\"print(1)\\"}"}}</tool_call>'
+        )
+        calls = parse_react_calls(text)
+        self.assertEqual(calls[0]["function"]["name"], "run_code")
+        self.assertEqual(json.loads(calls[0]["function"]["arguments"]), {"code": "print(1)"})
+
 
 class TestParseBareJsonCalls(unittest.TestCase):
     def test_plain_object(self):
@@ -105,10 +161,16 @@ class TestParseBareJsonCalls(unittest.TestCase):
         self.assertEqual(parse_bare_json_calls('{"key": "value", "x": 1}'), [])
         self.assertEqual(parse_bare_json_calls("普通回复"), [])
 
-    def test_multiline_arguments(self):
-        text = '<tool_call>{\n  "name": "run_code",\n  "arguments": {"code": "print(1)"}\n}</tool_call>'
-        calls = parse_react_calls(text)
+    def test_bare_with_markdown_fence(self):
+        text = '```json\n{"name": "read_skill", "arguments": {"name": "weather"}}\n```'
+        calls = parse_bare_json_calls(text)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["function"]["name"], "read_skill")
+
+    def test_bare_key_variants(self):
+        calls = parse_bare_json_calls('{"tool_name": "run_code", "args": {"code": "x"}}')
         self.assertEqual(calls[0]["function"]["name"], "run_code")
+        self.assertEqual(json.loads(calls[0]["function"]["arguments"]), {"code": "x"})
 
 
 class _FakeStreamClient:

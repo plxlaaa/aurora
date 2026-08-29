@@ -28,44 +28,94 @@ DeltaSink = Callable[[dict[str, Any]], Awaitable[None]]
 MAX_TOOL_ROUNDS = 5
 
 # 文本协议（ReAct）调用标记：<tool_call>{"name": ..., "arguments": {...}}</tool_call>
-TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+# 容忍 toolcall/toolCall 等标签变体与大小写；内容允许夹杂 markdown 代码块围栏
+TOOL_CALL_RE = re.compile(
+    r"<\s*tool_?call\s*>\s*(.*?)\s*<\s*/\s*tool_?call\s*>", re.DOTALL | re.IGNORECASE
+)
+
+# 模型输出 JSON 时的常见键名变体（name / arguments 及其同义词）
+_CALL_NAME_KEYS = ("name", "tool", "tool_name", "toolCall")
+_CALL_ARGS_KEYS = ("arguments", "args", "parameters", "input", "params")
+
+_MD_FENCE_RE = re.compile(
+    r"^\s*`{3,}[a-zA-Z0-9_-]*\s*\n?(?P<body>.*?)\n?\s*`{3,}\s*$", re.DOTALL
+)
 
 # OpenAI 兼容接口允许的 role；网关记录用的 thinking/tool_call/assistant_delta 等不在此列
 _LLM_ROLES = {"system", "user", "assistant", "tool"}
+
+
+def _strip_md_fence(text: str) -> str:
+    """剥离模型在 JSON 外层包裹的 markdown 代码块围栏。"""
+    stripped = (text or "").strip()
+    match = _MD_FENCE_RE.match(stripped)
+    if match and "{" in match.group("body"):
+        return match.group("body").strip()
+    return stripped
+
+
+def _payload_to_call(payload: Any) -> dict[str, Any] | None:
+    """把模型输出的调用 JSON 归一化为 {name, arguments}；形态不符返回 None。
+
+    兼容：name/arguments 正常形态、tool/tool_name 等键名变体、
+    arguments 为 JSON 字符串的双重编码、OpenAI tool_calls 的 function 嵌套形态。
+    """
+    if not isinstance(payload, dict):
+        return None
+    if isinstance(payload.get("function"), dict):
+        payload = payload["function"]
+    name = next(
+        (payload[k] for k in _CALL_NAME_KEYS if isinstance(payload.get(k), str) and payload[k]),
+        None,
+    )
+    if not name:
+        return None
+    args: Any = next((payload[k] for k in _CALL_ARGS_KEYS if k in payload), None)
+    if isinstance(args, str):
+        # 双重编码：arguments 实为 JSON 字符串，尝试还原为对象
+        try:
+            decoded = json.loads(args)
+        except json.JSONDecodeError:
+            decoded = None
+        args = decoded if isinstance(decoded, dict) else ({"input": args} if args else {})
+    elif not isinstance(args, dict):
+        args = {"input": args} if args is not None else {}
+    return {"name": name, "arguments": args}
+
+
+def _format_call(call_id: str, normalized: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": normalized["name"],
+            "arguments": json.dumps(normalized["arguments"], ensure_ascii=False),
+        },
+    }
 
 
 def parse_react_calls(text: str) -> list[dict[str, Any]]:
     """解析文本协议中的 <tool_call> 标记，返回与原生 tool_calls 同构的调用列表。"""
     calls: list[dict[str, Any]] = []
     for i, match in enumerate(TOOL_CALL_RE.finditer(text or "")):
+        raw = _strip_md_fence(match.group(1))
         try:
-            payload = json.loads(match.group(1))
+            payload = json.loads(raw)
         except json.JSONDecodeError:
             logger.warning("文本协议调用标记 JSON 非法，已跳过")
             continue
-        if not isinstance(payload, dict) or not payload.get("name"):
+        normalized = _payload_to_call(payload)
+        if normalized is None:
             continue
-        args = payload.get("arguments")
-        if not isinstance(args, dict):
-            args = {"input": args} if args is not None else {}
-        calls.append(
-            {
-                "id": f"react_{i + 1}",
-                "type": "function",
-                "function": {
-                    "name": str(payload["name"]),
-                    "arguments": json.dumps(args, ensure_ascii=False),
-                },
-            }
-        )
+        calls.append(_format_call(f"react_{i + 1}", normalized))
     return calls
 
 
 def parse_bare_json_calls(text: str) -> list[dict[str, Any]]:
     """裸 JSON 兜底：模型省略 <tool_call> 标记直接输出调用 JSON 时解析为候选调用。
 
-    从文本中扫描完整 JSON 对象（允许前后夹杂说明文字），仅提取同时具备
-    name(str) 与 arguments 结构的条目；是否为已注册工具由调用方校验。
+    从文本中扫描完整 JSON 对象（允许前后夹杂说明文字或代码块围栏），
+    仅提取可归一化为工具调用的条目；是否为已注册工具由调用方校验。
     """
     stripped = (text or "").strip()
     calls: list[dict[str, Any]] = []
@@ -80,24 +130,9 @@ def parse_bare_json_calls(text: str) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             idx += 1
             continue
-        if (
-            isinstance(payload, dict)
-            and isinstance(payload.get("name"), str)
-            and payload["name"]
-        ):
-            args = payload.get("arguments")
-            if not isinstance(args, dict):
-                args = {"input": args} if args is not None else {}
-            calls.append(
-                {
-                    "id": f"react_bare_{len(calls) + 1}",
-                    "type": "function",
-                    "function": {
-                        "name": payload["name"],
-                        "arguments": json.dumps(args, ensure_ascii=False),
-                    },
-                }
-            )
+        normalized = _payload_to_call(payload)
+        if normalized is not None:
+            calls.append(_format_call(f"react_bare_{len(calls) + 1}", normalized))
         idx = max(end, idx + 1)
     return calls
 
