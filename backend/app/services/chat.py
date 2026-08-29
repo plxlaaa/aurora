@@ -370,14 +370,27 @@ class ChatPipeline:
                         "content": result_text,
                     }
                 )
-            else:
-                history.append(
+                # 通知网关持久化 role=tool 结果（前端据此更新工具卡片）
+                await sink(
                     {
-                        "role": "user",
-                        "content": (
-                            f'<tool_result name="{name}">{result_text}</tool_result>\n'
-                            "请根据工具结果继续。"
-                        ),
+                        "type": "tool",
+                        "tool_call_id": call_id,
+                        "name": name,
+                        "content": result_text,
+                    }
+                )
+            else:
+                backfill = (
+                    f'<tool_result name="{name}">{result_text}</tool_result>\n'
+                    "请根据工具结果继续。"
+                )
+                history.append({"role": "user", "content": backfill})
+                # 文本协议回填事件；字段避开 content 以免前端误渲染为正文
+                await sink(
+                    {
+                        "type": "tool_result",
+                        "name": name,
+                        "result_text": result_text,
                     }
                 )
 

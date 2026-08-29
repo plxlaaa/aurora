@@ -235,6 +235,10 @@ class TestPipelineReAct(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["content"], "根据文档，天气工具这样用：直接回答。")
         types = [e["type"] for e in sink]
         self.assertIn("tool_call", types)
+        self.assertIn("tool_result", types)
+        result_event = next(e for e in sink if e["type"] == "tool_result")
+        self.assertEqual(result_event["name"], "read_skill")
+        self.assertNotIn("content", result_event)  # 避免前端误渲染为正文
         self.assertEqual(sink[-1]["type"], "done")
 
     async def test_bare_json_fallback_roundtrip(self):

@@ -568,6 +568,9 @@ def _record_event(session_id: str, event: dict[str, Any]) -> None:
     elif etype == "thinking":
         sessions.append_stream(session_id, "thinking", event.get("text", ""))
     elif etype == "tool_call":
+        # running 状态不落盘，避免与 done/error 重复记录
+        if event.get("status") == "running":
+            return
         sessions.append(session_id, {
             "role": "tool_call",
             "name": event.get("name"),
@@ -581,6 +584,16 @@ def _record_event(session_id: str, event: dict[str, Any]) -> None:
             "tool_call_id": event.get("tool_call_id"),
             "name": event.get("name"),
             "content": event.get("content"),
+        })
+    elif etype == "tool_result":
+        # 文本协议工具结果：以 user 消息形态落盘，与 pipeline 内部历史一致
+        sessions.append(session_id, {
+            "role": "user",
+            "content": (
+                f'<tool_result name="{event.get("name", "")}">'
+                f'{event.get("result_text", "")}</tool_result>\n'
+                "请根据工具结果继续。"
+            ),
         })
     elif etype == "delta" and event.get("text"):
         # 流式增量合并进末尾同 role 记录，避免 JSONL 行数爆炸
