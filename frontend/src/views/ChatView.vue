@@ -448,6 +448,14 @@ function handleMessage(raw) {
     case 'tool':
       upsertToolResult(data)
       break
+    case 'tool_result':
+      // 文本协议结果回填：与后端落盘格式保持一致，渲染为工具卡片
+      messages.value.push({
+        id: nextId(),
+        role: 'user',
+        content: `<tool_result name="${data.name || ''}">${data.result_text || ''}</tool_result>\n请根据工具结果继续。`
+      })
+      break
     case 'info':
       notify(data.text || '', 'ok')
       break

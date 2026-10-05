@@ -568,6 +568,9 @@ async def export_session(
         if role == "user":
             lines += ["## 🧑 用户", "", content, ""]
         elif role == "assistant":
+            # 剔除文本协议调用标记（调用过程以工具行呈现）
+            import re as _re
+            content = _re.sub(r"<\s*tool_?call\s*>[\s\S]*?<\s*/\s*tool_?call\s*>", "", content)
             lines += ["## 🤖 助手", "", content, ""]
         elif role == "tool":
             lines += [f"> 🔧 工具 `{msg.get('name', '')}` 结果：", ">", f"> {content}", ""]

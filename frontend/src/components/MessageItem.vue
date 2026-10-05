@@ -1,7 +1,22 @@
 <template>
   <div class="msg" :class="'role-' + message.role">
-    <!-- 用户消息 -->
-    <template v-if="message.role === 'user'">
+    <!-- 用户消息（含文本协议工具结果包装：渲染为工具卡片而非用户气泡） -->
+    <template v-if="message.role === 'user' && toolResultInfo">
+      <div class="row tool-row">
+        <span class="avatar tool-avatar">⚙</span>
+        <div class="body-col">
+          <div class="status-row">
+            <span class="state done">✓</span>
+            <span class="s-tool">{{ toolResultInfo.name || '工具' }}</span>
+            <span class="state-text done">结果回填</span>
+          </div>
+          <div class="tool-result">
+            <pre class="tool-result-body">{{ toolResultInfo.text }}</pre>
+          </div>
+        </div>
+      </div>
+    </template>
+    <template v-else-if="message.role === 'user'">
       <div class="row user-row">
         <div class="body-col">
           <div v-if="message.attachments && message.attachments.length" class="att-thumbs">
@@ -91,7 +106,7 @@
         <span class="avatar ai-avatar">AI</span>
         <div class="body-col">
           <div class="bubble assistant-bubble">
-            <MarkdownText :text="message.content" :streaming="streaming" />
+            <MarkdownText :text="assistantText" :streaming="streaming" />
             <span v-if="streaming" class="cursor">▍</span>
           </div>
           <!-- 消息操作 -->
@@ -156,6 +171,23 @@ const preview = computed(() => {
   const t = props.message.content || ''
   return t.length > 60 ? t.slice(0, 60) + '…' : t
 })
+
+// 文本协议工具结果回填：user 消息内容为 <tool_result name="x">...</tool_result> 时识别为工具卡片
+const toolResultInfo = computed(() => {
+  if (props.message.role !== 'user') return null
+  const m = /^<tool_result\s+name="([^"]*)">([\s\S]*?)<\/tool_result>/.exec(
+    props.message.content || ''
+  )
+  return m ? { name: m[1], text: m[2].trim() } : null
+})
+
+// 助手正文剔除文本协议调用标记（调用过程已由工具卡片呈现，避免 JSON 原文漏出）
+const assistantText = computed(() =>
+  (props.message.content || '').replace(
+    /<\s*tool_?call\s*>[\s\S]*?<\s*\/\s*tool_?call\s*>/gi,
+    ''
+  )
+)
 
 const hasResult = computed(() => {
   const r = props.message.result
