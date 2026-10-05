@@ -60,6 +60,26 @@ async function request(method, url, body, formData = false) {
   return text ? JSON.parse(text) : null
 }
 
+// 下载文件（带鉴权）：请求 blob 并触发浏览器保存
+export async function downloadFile(url, fallbackName = 'download') {
+  const headers = {}
+  const token = getToken()
+  if (token) headers['Authorization'] = `Bearer ${token}`
+  const res = await fetch(url, { headers })
+  if (res.status === 401 && onUnauthorized) onUnauthorized()
+  if (!res.ok) throw new ApiError(`下载失败 (${res.status})`, res.status)
+  const blob = await res.blob()
+  const dispo = res.headers.get('Content-Disposition') || ''
+  const m = dispo.match(/filename="?([^";]+)"?/)
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = m ? decodeURIComponent(m[1]) : fallbackName
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(a.href)
+}
+
 export const http = {
   get: (url) => request('GET', url),
   put: (url, body) => request('PUT', url, body),

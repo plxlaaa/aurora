@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections import OrderedDict
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
@@ -531,6 +532,63 @@ async def rename_session(
     return {"ok": True, "id": session_id, "title": title}
 
 
+@router.get("/api/sessions/{session_id}/export")
+async def export_session(
+    session_id: str,
+    format: str = "md",
+    _: Annotated[None, Depends(require_auth)] = None,
+) -> Response:
+    """导出会话为 Markdown 或 JSON 文件。"""
+    import json as _json
+    sessions.collapse_deltas(session_id)
+    messages = sessions.load(session_id)
+    if not messages:
+        raise HTTPException(status_code=404, detail="会话不存在或为空")
+    meta = next(
+        (s for s in sessions.list_sessions() if s["id"] == session_id), {}
+    )
+    title = str(meta.get("title") or session_id)
+    from urllib.parse import quote
+    ascii_name = "".join(c for c in title if c.isascii() and (c.isalnum() or c in "-_ "))[:40].strip() or "session"
+    utf8_name = quote("".join(c for c in title if c.isalnum() or c in "-_ ")[:40].strip() or session_id)
+    if format == "json":
+        content = _json.dumps(
+            {"id": session_id, "title": title, "messages": messages},
+            ensure_ascii=False, indent=2,
+        )
+        return Response(
+            content=content, media_type="application/json",
+            headers={"Content-Disposition": f"attachment; filename=\"{ascii_name}.json\"; filename*=UTF-8''{utf8_name}.json"},
+        )
+    # Markdown 导出：按角色排版，工具调用与思考过程折叠
+    lines: list[str] = [f"# {title}", ""]
+    for msg in messages:
+        role = msg.get("role", "")
+        content = msg.get("content") or ""
+        if role == "user":
+            lines += ["## 🧑 用户", "", content, ""]
+        elif role == "assistant":
+            lines += ["## 🤖 助手", "", content, ""]
+        elif role == "tool":
+            lines += [f"> 🔧 工具 `{msg.get('name', '')}` 结果：", ">", f"> {content}", ""]
+        elif role == "tool_call":
+            args = _json.dumps(msg.get("arguments") or {}, ensure_ascii=False)
+            result = msg.get("result")
+            result_text = _json.dumps(result, ensure_ascii=False) if result is not None else ""
+            lines += [
+                f"> 🔧 调用 `{msg.get('name', '')}` 参数：`{args}`",
+                (f"> 结果：`{result_text}`" if result_text else ""),
+                "",
+            ]
+        elif role == "thinking":
+            lines += ["<details><summary>💭 思考过程</summary>", "", content, "", "</details>", ""]
+    text = "\n".join(lines)
+    return Response(
+        content=text, media_type="text/markdown",
+        headers={"Content-Disposition": f"attachment; filename=\"{ascii_name}.md\"; filename*=UTF-8''{utf8_name}.md"},
+    )
+
+
 @router.post("/api/auth/login")
 async def login(payload: dict[str, Any]) -> dict[str, Any]:
     if not auth.auth_enabled():
@@ -544,7 +602,16 @@ async def login(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------- WebSocket ----------
-_attach_data_cache: dict[str, tuple[bytes, str]] = {}
+# 附件数据缓存（object_id -> 原始字节）；LRU 上限防内存泄漏
+_ATTACH_CACHE_MAX = 32
+_attach_data_cache: OrderedDict[str, tuple[bytes, str]] = OrderedDict()
+
+
+def _cache_attach(object_id: str, data: bytes, mime: str) -> None:
+    _attach_data_cache[object_id] = (data, mime)
+    _attach_data_cache.move_to_end(object_id)
+    while len(_attach_data_cache) > _ATTACH_CACHE_MAX:
+        _attach_data_cache.popitem(last=False)
 
 
 def _resolve_attachments(attachments: list[Any]) -> list[dict[str, Any]]:
@@ -561,7 +628,7 @@ def _resolve_attachments(attachments: list[Any]) -> list[dict[str, Any]]:
                 if found is None:
                     continue
                 data, mime = found
-                _attach_data_cache[object_id] = (data, mime)
+                _cache_attach(object_id, data, mime)
             data, mime = _attach_data_cache[object_id]
             resolved.append({
                 "type": "image",

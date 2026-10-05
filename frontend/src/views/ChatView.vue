@@ -45,6 +45,8 @@
             </span>
             <span v-if="s.status === 'running'" class="s-status" title="处理中">◔</span>
             <button class="s-action" title="重命名" @click.stop="startRename(s)">✎</button>
+            <button class="s-action" title="导出 Markdown" @click.stop="exportSession(s.id, 'md')">⤓M</button>
+            <button class="s-action" title="导出 JSON" @click.stop="exportSession(s.id, 'json')">⤓J</button>
             <button class="s-action" title="归档会话" @click.stop="archive(s.id)">⇱</button>
             <button class="s-action danger" title="删除会话" @click.stop="remove(s.id)">✕</button>
           </template>
@@ -194,11 +196,12 @@ import {
   deleteSession,
   archiveSession,
   renameSession,
+  exportSessionUrl,
   uploadImage,
   triggerCompress,
   getModels
 } from '../api'
-import { getToken } from '../api/http'
+import { getToken, downloadFile } from '../api/http'
 import MessageItem from '../components/MessageItem.vue'
 
 const suggestions = [
@@ -695,6 +698,17 @@ async function remove(id) {
     loadSessions()
   } catch (e) {
     notify('删除会话失败：' + e.message, 'error')
+  }
+}
+
+async function exportSession(id, format) {
+  try {
+    const s = sessions.value.find((x) => x.id === id)
+    const name = (s?.title || id).replace(/[^\w\u4e00-\u9fa5-]+/g, '_').slice(0, 40) || id
+    await downloadFile(exportSessionUrl(id, format), `${name}.${format}`)
+    notify(`已导出 ${format.toUpperCase()}`, 'ok')
+  } catch (e) {
+    notify('导出失败：' + e.message, 'error')
   }
 }
 

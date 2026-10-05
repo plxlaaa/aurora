@@ -81,6 +81,8 @@ export const archiveSession = (id) =>
   http.post(base(`/sessions/${encodeURIComponent(id)}/archive`))
 export const renameSession = (id, title) =>
   http.post(base(`/sessions/${encodeURIComponent(id)}/rename`), { title })
+export const exportSessionUrl = (id, format = 'md') =>
+  base(`/sessions/${encodeURIComponent(id)}/export?format=${format}`)
 
 export default {
   login,
@@ -119,5 +121,6 @@ export default {
   getSession,
   deleteSession,
   archiveSession,
-  renameSession
+  renameSession,
+  exportSessionUrl
 }
