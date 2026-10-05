@@ -210,7 +210,9 @@ class ChatPipeline:
                 vis_client = self.registry.get("vision")
                 if vis_client is None:
                     raise RuntimeError("视觉端点不可用")
-                vision_messages = list(messages)
+                vision_messages = self._inject_system(
+                    list(messages), self.tools.build_directory()
+                )
                 self.vision.attach_image_to_messages(vision_messages, image_attachments)
                 return await self._vision_roundtrip(vis_client, vision_messages, sink, cancel)
             self.vision.attach_image_to_messages(messages, image_attachments)

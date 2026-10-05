@@ -23,12 +23,25 @@ logger = logging.getLogger("aiassistant.tools")
 BUILTIN_TOOL_NAMES = ("read_skill", "run_skill", "run_code")
 
 _REACT_INSTRUCTIONS = """\
-## 工具调用方式
-当你需要使用工具完成任务时，若本次请求提供了原生工具调用通道则优先使用原生工具调用；
-否则严格按以下格式输出调用标记（每次只调用一个工具，标记外可以有简短说明文字）：
-<tool_call>{"name": "工具名", "arguments": {"参数名": "值"}}</tool_call>
-系统会执行工具并以 <tool_result name="工具名">...</tool_result> 的 user 消息返回结果，
-收到结果后请继续推理直至给出最终回答。"""
+# 工具使用说明
+本会话为你注册了可用工具（目录见下）。请遵守以下规则：
+
+1. **先用工具，再回答**：只要任务涉及工具能完成的事（获取实时/外部信息、执行代码计算、
+   读写数据、执行 Skill 等），必须先调用工具拿到事实依据，禁止凭记忆猜测或编造结果。
+2. **主动查找工具**：回答前先扫一遍下方目录；不确定有没有合适工具时也先查一遍再决定。
+   目录中确实没有可用工具时，才直接回答并说明限制。
+3. **调用格式**：若本次请求提供了原生工具调用通道（tools 参数）则优先使用原生调用；
+   否则严格按以下标记格式输出（每次一个工具，标记外可带一句简短说明）：
+   <tool_call>{"name": "工具名", "arguments": {"参数": "值"}}</tool_call>
+4. **收到结果后继续**：系统会以 <tool_result name="工具名">...</tool_result> 的 user 消息
+   回填执行结果，请基于结果继续推理；一次调用不够时可以按同样方式继续调用其他工具。
+
+### 调用示例
+用户：帮我算一下 2 的 100 次方
+你的回复：我用代码算一下。
+<tool_call>{"name": "run_code", "arguments": {"code": "print(2 ** 100)"}}</tool_call>
+系统回填：<tool_result name="run_code">{"stdout": "1267650600228229401496703205376", ...}</tool_result>
+你的最终回复：2 的 100 次方等于 1267650600228229401496703205376（约 1.27×10^30）。"""
 
 
 class ToolRegistry:
@@ -108,8 +121,11 @@ class ToolRegistry:
 
     # -- 工具目录 --
     def build_directory(self) -> str:
-        """生成 system prompt 使用的工具目录文本（空分组省略）。"""
-        sections: list[str] = ["# 可用工具目录\n你可以使用以下工具："]
+        """生成 system prompt 使用的工具目录文本（空分组省略）。
+
+        结构：调用说明在前（指令优先，弱模型不易忽略）→ 分组目录 → 结尾强调。
+        """
+        sections: list[str] = [_REACT_INSTRUCTIONS, "# 可用工具目录\n你可以使用以下工具："]
 
         builtin = self._builtin_definitions()
         lines = [f"- {n}: {builtin[n]['function']['description']}" for n in BUILTIN_TOOL_NAMES]
@@ -135,7 +151,11 @@ class ToolRegistry:
             lines = [f"- {t['name']}: {t['description']}" for t in custom]
             sections.append("## 自定义工具\n" + "\n".join(lines))
 
-        return "\n\n".join(sections) + "\n\n" + _REACT_INSTRUCTIONS
+        return "\n\n".join(sections) + "\n\n" + (
+            "## 再次提醒\n"
+            "回答涉及上方任何工具能完成的任务时，先调用工具再回答；"
+            "调用格式见开头的「工具使用说明」。"
+        )
 
     # -- 执行分发 --
     async def dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:

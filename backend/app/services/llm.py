@@ -87,9 +87,21 @@ class LLMClient:
 
     @staticmethod
     def _is_tools_blocked_error(body: bytes) -> bool:
-        """判断 400 是否因模型不支持 function calling 所致。"""
+        """判断 400 是否因模型不支持 function calling 所致。
+
+        各中转站报错文案不统一，宽松匹配「工具/函数调用」+「不支持/未启用」组合，
+        避免漏判导致报错直抛而非去掉 tools 降级重试。
+        """
         text = body.decode("utf-8", "ignore").lower()
-        return "function call" in text and "not supported" in text
+        mentions_tools = any(
+            kw in text
+            for kw in ("function call", "tool use", "tool call", '"tools"', "函数调用", "工具调用", "工具")
+        )
+        rejected = any(
+            kw in text
+            for kw in ("not support", "unsupported", "not enabled", "disabled", "不支持", "未启用", "不支持工具")
+        )
+        return mentions_tools and rejected
 
     @staticmethod
     def _http_error(resp: httpx.Response, body: bytes) -> httpx.HTTPStatusError:
