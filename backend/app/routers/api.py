@@ -40,10 +40,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import time
 from collections import OrderedDict
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 
 from ..core import auth
@@ -79,6 +80,18 @@ def require_auth(authorization: Annotated[str | None, Header()] = None) -> None:
         token = authorization[7:]
     if not auth.check_bearer(token):
         raise HTTPException(status_code=401, detail="未授权")
+
+
+# ---------- 全局生成并发上限 ----------
+# 信号量限制同时在跑的生成任务数，防多连接无上限并发压垮模型端点
+_MAX_CONCURRENT_GENERATIONS = 3
+_generation_slots = asyncio.Semaphore(_MAX_CONCURRENT_GENERATIONS)
+
+
+def _reject_busy_session(session_id: str) -> None:
+    """写操作与生成中会话互斥：压缩/清空/删除与流式落盘并发会写坏会话文件。"""
+    if sessions.get_status(session_id) == sessions.STATUS_RUNNING:
+        raise HTTPException(status_code=409, detail="会话正在生成中，请稍后再试")
 
 
 def _merge_dict(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
@@ -461,6 +474,7 @@ async def manual_compress(
     payload: dict[str, Any], _: Annotated[None, Depends(require_auth)]
 ) -> dict[str, Any]:
     session_id = payload.get("session_id", "")
+    _reject_busy_session(session_id)
     messages = sessions.load(session_id)
     if not messages:
         raise HTTPException(status_code=404, detail="会话不存在或为空")
@@ -495,6 +509,7 @@ async def get_session(session_id: str, _: Annotated[None, Depends(require_auth)]
 
 @router.delete("/api/sessions/{session_id}")
 async def delete_session(session_id: str, _: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
+    _reject_busy_session(session_id)
     if not sessions.delete(session_id):
         raise HTTPException(status_code=404, detail="会话不存在")
     return {"ok": True}
@@ -502,6 +517,7 @@ async def delete_session(session_id: str, _: Annotated[None, Depends(require_aut
 
 @router.post("/api/sessions/{session_id}/clear")
 async def clear_session(session_id: str, _: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
+    _reject_busy_session(session_id)
     if not sessions.exists(session_id):
         raise HTTPException(status_code=404, detail="会话不存在")
     sessions.clear(session_id)
@@ -512,6 +528,7 @@ async def clear_session(session_id: str, _: Annotated[None, Depends(require_auth
 async def archive_session(
     session_id: str, _: Annotated[None, Depends(require_auth)]
 ) -> dict[str, Any]:
+    _reject_busy_session(session_id)
     dest = sessions.archive(session_id)
     if dest is None:
         raise HTTPException(status_code=404, detail="会话不存在")
@@ -592,15 +609,37 @@ async def export_session(
     )
 
 
+# ---------- 登录速率限制（防口令爆破） ----------
+_LOGIN_ATTEMPT_MAX = 5        # 窗口内最大失败次数
+_LOGIN_WINDOW = 60.0          # 失败计数窗口（秒）
+_LOGIN_LOCKOUT = 300.0        # 触发上限后的锁定时长（秒）
+_login_failures: dict[str, list[float]] = {}  # ip -> 失败时间戳
+
+
+def _login_guard(ip: str) -> None:
+    """超限则拒绝；失败记录自动过期（按锁定窗口过滤）。"""
+    now = time.monotonic()
+    recent = [t for t in _login_failures.get(ip, []) if now - t < _LOGIN_LOCKOUT]
+    _login_failures[ip] = recent
+    # 仅统计计数窗口内的失败
+    if sum(1 for t in recent if now - t < _LOGIN_WINDOW) >= _LOGIN_ATTEMPT_MAX:
+        raise HTTPException(status_code=429, detail="尝试过于频繁，请 5 分钟后再试")
+
+
 @router.post("/api/auth/login")
-async def login(payload: dict[str, Any]) -> dict[str, Any]:
+async def login(payload: dict[str, Any], request: Request) -> dict[str, Any]:
+    ip = request.client.host if request.client else "unknown"
     if not auth.auth_enabled():
         return {"token": auth.create_jwt(), "auth_enabled": False}
+    _login_guard(ip)
     password = payload.get("password", "")
     if password and auth.check_bearer(password):
+        _login_failures.pop(ip, None)
         return {"token": auth.create_jwt(), "auth_enabled": True}
     if auth.check_bearer(payload.get("api_key", "")):
+        _login_failures.pop(ip, None)
         return {"token": auth.create_jwt(), "auth_enabled": True}
+    _login_failures.setdefault(ip, []).append(time.monotonic())
     raise HTTPException(status_code=401, detail="凭据无效")
 
 
@@ -743,6 +782,11 @@ async def chat(ws: WebSocket) -> None:
             sessions.collapse_deltas(session_id)
             sessions.mark_completed(session_id)
 
+    async def _guarded_generate(*args, **kwargs):
+        """占用全局生成槽位执行；槽位耗尽时排队会被调用前的 locked() 检查拦截。"""
+        async with _generation_slots:
+            return await generate(*args, **kwargs)
+
     def busy() -> bool:
         return current_task is not None and not current_task.done()
 
@@ -815,7 +859,12 @@ async def chat(ws: WebSocket) -> None:
                 sessions.save(session_id, history)
                 resolved = _resolve_attachments(history[idx].get("attachments", []))
                 cancel_event = asyncio.Event()
-                current_task = asyncio.create_task(generate(history, resolved, False, cancel_event))
+                if _generation_slots.locked():
+                    await ws.send_json({"type": "error", "message": "系统生成任务已达上限，请稍后再试"})
+                    continue
+                current_task = asyncio.create_task(
+                    _guarded_generate(history, False, cancel_event)
+                )
                 continue
 
             content = msg.get("content", "")
@@ -836,8 +885,11 @@ async def chat(ws: WebSocket) -> None:
             sessions.append(session_id, user_msg)
 
             cancel_event = asyncio.Event()
+            if _generation_slots.locked():
+                await ws.send_json({"type": "error", "message": "系统生成任务已达上限，请稍后再试"})
+                continue
             current_task = asyncio.create_task(
-                generate(history, resolved, bool(msg.get("force_compress", False)), cancel_event)
+                _guarded_generate(history, resolved, bool(msg.get("force_compress", False)), cancel_event)
             )
     except WebSocketDisconnect:
         logger.info("客户端断开连接")
