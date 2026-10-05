@@ -112,29 +112,23 @@ def parse_react_calls(text: str) -> list[dict[str, Any]]:
 
 
 def parse_bare_json_calls(text: str) -> list[dict[str, Any]]:
-    """裸 JSON 兜底：模型省略 <tool_call> 标记直接输出调用 JSON 时解析为候选调用。
+    """裸 JSON 兜底：模型省略标记、直接输出完整调用 JSON 时解析为候选调用。
 
-    从文本中扫描完整 JSON 对象（允许前后夹杂说明文字或代码块围栏），
-    仅提取可归一化为工具调用的条目；是否为已注册工具由调用方校验。
+    仅当剥离代码围栏后的整段文本恰好是一个 JSON 对象时才解析——
+    不做全文扫描，避免模型在正文里举例说明工具用法（如「格式为 {"name": ...}」）
+    时被误判为调用指令。是否为已注册工具由调用方校验。
     """
-    stripped = (text or "").strip()
-    calls: list[dict[str, Any]] = []
-    decoder = json.JSONDecoder()
-    idx = 0
-    while idx < len(stripped):
-        if stripped[idx] != "{":
-            idx += 1
-            continue
-        try:
-            payload, end = decoder.raw_decode(stripped, idx)
-        except json.JSONDecodeError:
-            idx += 1
-            continue
-        normalized = _payload_to_call(payload)
-        if normalized is not None:
-            calls.append(_format_call(f"react_bare_{len(calls) + 1}", normalized))
-        idx = max(end, idx + 1)
-    return calls
+    stripped = _strip_md_fence((text or "").strip()).strip()
+    if not (stripped.startswith("{") and stripped.endswith("}")):
+        return []
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        return []
+    normalized = _payload_to_call(payload)
+    if normalized is None:
+        return []
+    return [_format_call("react_bare_1", normalized)]
 
 
 def _normalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

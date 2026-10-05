@@ -84,9 +84,11 @@ class Executor:
                 for k, v in d["env"].items():
                     cmd += ["-e", f"{k}={v}"]
             cmd += ["-w", workdir]
+            # 挂载参数必须在镜像名之前，否则 docker 会将其视为容器命令参数（挂载失效）
+            if script_path is not None:
+                cmd += ["-v", f"{script_path}:/tmp/sandbox_script.py:ro"]
             cmd += [image, "python3"]
             if script_path is not None:
-                cmd += ["-v", f"{script_path}:/tmp/sandbox_script.py"]
                 cmd += ["/tmp/sandbox_script.py"]
             else:
                 cmd += ["-c", code]

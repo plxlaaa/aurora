@@ -800,7 +800,12 @@ async def chat(ws: WebSocket) -> None:
                 history = sessions.load(session_id)
                 idx = None
                 for i in range(len(history) - 1, -1, -1):
-                    if history[i].get("role") == "user":
+                    msg_i = history[i]
+                    # 跳过工具结果包装的 user 消息：重放「请根据工具结果继续」
+                    # 会缺失工具调用上下文导致模型混乱，应定位到原始提问
+                    if msg_i.get("role") == "user" and not str(
+                        msg_i.get("content") or ""
+                    ).startswith("<tool_result"):
                         idx = i
                         break
                 if idx is None:

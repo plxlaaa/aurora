@@ -91,6 +91,7 @@ class _FakeResp:
         self.status_code = status_code
         self.text = text
         self._data = data
+        self.is_redirect = False
 
     def json(self):
         if self._data is None:
@@ -125,8 +126,10 @@ class TestHTTPExecution(unittest.IsolatedAsyncioTestCase):
             "type": "http",
             "http": {"url": "https://api.example.com/stock/{symbol}", "method": "GET"},
         }
-        with mock.patch.object(ct_mod, "httpx", SimpleNamespace(AsyncClient=_FakeAsyncClient, HTTPError=httpx.HTTPError)):
-            result = await mgr._run_http(tool, {"symbol": "600519", "days": 5})
+        # SSRF 校验会做真实 DNS 解析，测试中跳过（被 mock 的 httpx 不会真发请求）
+        with mock.patch.object(ct_mod, "_assert_public_url", lambda url: None):
+            with mock.patch.object(ct_mod, "httpx", SimpleNamespace(AsyncClient=_FakeAsyncClient, HTTPError=httpx.HTTPError)):
+                result = await mgr._run_http(tool, {"symbol": "600519", "days": 5})
         self.assertIn("result", result)
         req = _FakeAsyncClient.captured[-1]
         self.assertEqual(req["method"], "GET")
@@ -138,6 +141,30 @@ class TestHTTPExecution(unittest.IsolatedAsyncioTestCase):
         tool = {"name": "t", "type": "http", "http": {"url": "https://api.example.com/{a}"}} 
         result = await mgr._run_http(tool, {})
         self.assertIn("error", result)
+
+
+class TestSSRFGuard(unittest.TestCase):
+    """自定义 HTTP 工具的 SSRF 防护。"""
+
+    def test_blocks_loopback(self):
+        with self.assertRaises(ValueError):
+            ct_mod._assert_public_url("http://127.0.0.1:8080/admin")
+
+    def test_blocks_private(self):
+        with self.assertRaises(ValueError):
+            ct_mod._assert_public_url("http://192.168.1.1/router")
+
+    def test_blocks_link_local_metadata(self):
+        with self.assertRaises(ValueError):
+            ct_mod._assert_public_url("http://169.254.169.254/latest/meta-data")
+
+    def test_blocks_bad_scheme(self):
+        with self.assertRaises(ValueError):
+            ct_mod._assert_public_url("file:///etc/passwd")
+
+    def test_allows_public_ip_literal(self):
+        # 公网 IP 字面量不拦截（不做外网 DNS，保证测试离线可跑）
+        ct_mod._assert_public_url("http://93.184.216.34/api")
 
 
 class _LocalExecutor:

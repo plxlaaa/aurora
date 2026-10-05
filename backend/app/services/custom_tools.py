@@ -214,10 +214,23 @@ class CustomToolsManager:
                 kwargs["json"] = leftover
 
         try:
-            async with httpx.AsyncClient(follow_redirects=True) as client:
-                resp = await client.request(method, url, **kwargs)
+            # SSRF 防护：逐跳校验（含重定向目标），拒绝私网/环回/链路本地地址
+            current_url = url
+            async with httpx.AsyncClient(follow_redirects=False) as client:
+                for _hop in range(4):
+                    _assert_public_url(current_url)
+                    resp = await client.request(method, current_url, **kwargs)
+                    if resp.is_redirect:
+                        loc = resp.headers.get("location", "")
+                        if not loc:
+                            break
+                        current_url = str(httpx.URL(current_url).join(loc))
+                        continue
+                    break
         except httpx.HTTPError as exc:
             return {"error": f"HTTP 请求失败: {exc}"}
+        except ValueError as exc:
+            return {"error": str(exc)}
         text = resp.text[:MAX_RESULT_CHARS]
         if resp.status_code >= 400:
             return {"error": f"HTTP {resp.status_code}: {text}"}
@@ -245,6 +258,43 @@ class CustomToolsManager:
         if parsed.get("error"):
             return {"error": str(parsed["error"])}
         return {"result": parsed.get("result")}
+
+
+def _assert_public_url(url: str) -> None:
+    """SSRF 防护：解析目标地址，拒绝环回/私网/链路本地/保留地址。
+
+    先查字面量 IP，再对域名做 DNS 解析逐 IP 校验（防 DNS rebinding 的一跳）。
+    """
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"不允许的协议: {parsed.scheme or '(空)'}")
+    host = parsed.hostname or ""
+    if not host:
+        raise ValueError("URL 缺少主机名")
+    candidates: list[str] = []
+    try:
+        ipaddress.ip_address(host)
+        candidates.append(host)
+    except ValueError:
+        try:
+            candidates = [info[4][0] for info in socket.getaddrinfo(host, None)]
+        except OSError as exc:
+            raise ValueError(f"域名解析失败: {host}") from exc
+    for ip_text in candidates:
+        ip = ipaddress.ip_address(ip_text)
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            raise ValueError(f"禁止访问内网/保留地址: {ip}")
 
 
 def _fill_template(text: str, arguments: dict[str, Any]) -> str:

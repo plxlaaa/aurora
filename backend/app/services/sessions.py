@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
 import datetime as dt
 from pathlib import Path
@@ -30,6 +31,7 @@ class SessionStore:
         # 会话运行状态：{session_id: status}
         self._status: dict[str, str] = {}
         self._status_path = self.data_dir / "_status.json"
+        self._pending_delta: dict[str, dict[str, Any]] = {}
         self._load_status()
         # 自定义会话标题：{session_id: title}
         self._titles: dict[str, str] = {}
@@ -123,33 +125,66 @@ class SessionStore:
 
     def append(self, session_id: str, message: dict[str, Any]) -> None:
         with self._lock:
+            self._flush_pending(session_id)
             path = self._path(session_id)
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(message, ensure_ascii=False) + "\n")
             self._cache_valid = False
 
+    # 流式落盘节流：token 级 delta 先积压内存，按间隔批量写盘（避免每 token 全量读写文件）
+    STREAM_FLUSH_INTERVAL = 0.4  # 秒
+
     def append_stream(self, session_id: str, role: str, text: str) -> None:
-        """追加流式增量：合并进末尾的同 role 记录，避免 JSONL 行数爆炸。"""
+        """追加流式增量：合并进末尾的同 role 记录，避免 JSONL 行数爆炸。
+
+        首 token 立即落盘（崩溃不丢起点），后续按 STREAM_FLUSH_INTERVAL 节流；
+        节流期间数据暂存 _pending_delta，load/collapse/save 时强制合并。
+        """
         if not text:
             return
         with self._lock:
-            path = self._path(session_id)
-            messages = self.load(session_id)
-            if messages and messages[-1].get("role") == role:
-                messages[-1]["content"] = (messages[-1].get("content") or "") + text
-                self.save(session_id, messages)
+            pending = self._pending_delta.get(session_id)
+            if pending is None or pending["role"] != role:
+                self._flush_pending(session_id)
+                # 首个增量立即写入文件
+                path = self._path(session_id)
+                messages = self._load_unlocked(session_id)
+                if messages and messages[-1].get("role") == role:
+                    messages[-1]["content"] = (messages[-1].get("content") or "") + text
+                    self.save(session_id, messages)
+                else:
+                    self.append(session_id, {"role": role, "content": text})
+                self._pending_delta[session_id] = {
+                    "role": role, "text": "", "last_flush": time.monotonic(),
+                }
                 self._cache_valid = False
                 return
+            pending["text"] += text
+            now = time.monotonic()
+            if now - pending["last_flush"] >= self.STREAM_FLUSH_INTERVAL:
+                self._flush_pending(session_id)
+
+    def _flush_pending(self, session_id: str) -> None:
+        """将积压的流式增量合并进文件（须持有锁；文件已被写过的部分在 last_flush 前已入盘）。"""
+        pending = self._pending_delta.pop(session_id, None)
+        if pending is None or not pending["text"]:
+            return
+        path = self._path(session_id)
+        messages = self._load_unlocked(session_id)
+        role = pending["role"]
+        if messages and messages[-1].get("role") == role:
+            messages[-1]["content"] = (messages[-1].get("content") or "") + pending["text"]
+            self._write_unlocked(session_id, messages)
+        else:
             with open(path, "a", encoding="utf-8") as fh:
-                fh.write(
-                    json.dumps({"role": role, "content": text}, ensure_ascii=False) + "\n"
-                )
-            self._cache_valid = False
+                fh.write(json.dumps({"role": role, "content": pending["text"]}, ensure_ascii=False) + "\n")
+        self._cache_valid = False
 
     def collapse_deltas(self, session_id: str) -> None:
         """一轮生成结束后，将连续的 assistant_delta 合并为单条 assistant 消息。"""
         with self._lock:
-            messages = self.load(session_id)
+            self._flush_pending(session_id)
+            messages = self._load_unlocked(session_id)
             if not any(m.get("role") == "assistant_delta" for m in messages):
                 return
             merged: list[dict[str, Any]] = []
@@ -167,26 +202,42 @@ class SessionStore:
             self.save(session_id, merged)
             self._cache_valid = False
 
+    def _load_unlocked(self, session_id: str) -> list[dict[str, Any]]:
+        """读取会话文件（须持有锁；不触发 pending 合并，纯文件内容）。"""
+        path = self._path(session_id)
+        if not path.exists():
+            return []
+        messages: list[dict[str, Any]] = []
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    messages.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return messages
+
+    def _write_unlocked(self, session_id: str, messages: list[dict[str, Any]]) -> None:
+        """覆写会话文件（须持有锁）。"""
+        path = self._path(session_id)
+        tmp = path.with_suffix(".jsonl.tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            for msg in messages:
+                fh.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        tmp.replace(path)
+        self._cache_valid = False
+
     def load(self, session_id: str) -> list[dict[str, Any]]:
         with self._lock:
-            path = self._path(session_id)
-            if not path.exists():
-                return []
-            messages: list[dict[str, Any]] = []
-            with open(path, encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        messages.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
-            return messages
+            self._flush_pending(session_id)
+            return self._load_unlocked(session_id)
 
     def clear(self, session_id: str) -> None:
         """清空会话内容但保留会话本身（文件截断为空）。"""
         with self._lock:
+            self._pending_delta.pop(session_id, None)
             path = self._path(session_id)
             if path.exists():
                 path.write_text("", encoding="utf-8")
@@ -208,11 +259,9 @@ class SessionStore:
 
     def save(self, session_id: str, messages: list[dict[str, Any]]) -> None:
         with self._lock:
-            path = self._path(session_id)
-            with open(path, "w", encoding="utf-8") as fh:
-                for msg in messages:
-                    fh.write(json.dumps(msg, ensure_ascii=False) + "\n")
-            self._cache_valid = False
+            # 调用方传入的列表通常来自 load()（已含 pending 增量），直接丢弃缓冲
+            self._pending_delta.pop(session_id, None)
+            self._write_unlocked(session_id, messages)
 
     def archive(self, session_id: str) -> Path | None:
         """将会话文件移动到 archive 子目录，返回目标路径；会话不存在时返回 None。"""

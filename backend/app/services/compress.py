@@ -85,10 +85,20 @@ class ContextCompressor:
             else:
                 body.append(msg)
 
-        # 保留最近 K 轮原文（K 轮 = 2*K 条 user/assistant 消息）
+        # 保留最近 K 轮原文：边界必须落在真实 user 消息上（跳过工具结果包装），
+        # 否则截断会把 tool_call/tool 配对切断，压缩后的消息序列非法（LLM 400）
         keep_count = keep_recent * 2
-        recent = body[-keep_count:] if keep_count > 0 else []
-        to_summarize = body[:-keep_count] if keep_count > 0 else body
+
+        def _is_real_user(msg: dict[str, Any]) -> bool:
+            return msg.get("role") == "user" and not str(
+                msg.get("content") or ""
+            ).startswith("<tool_result")
+
+        boundary = max(0, len(body) - keep_count)
+        while boundary > 0 and not _is_real_user(body[boundary]):
+            boundary -= 1
+        recent = body[boundary:]
+        to_summarize = body[:boundary]
 
         strategy = cfg.get("strategy", "map_reduce")
         if strategy == "truncate" or not to_summarize:
@@ -134,7 +144,13 @@ class ContextCompressor:
             return self._truncate_summary(messages)
 
         prompt_template = cfg.get("prompt", "请将以下对话历史压缩为一份简报。")
-        chunks = _split_into_chunks(messages)
+        # 摘要只吃正文：thinking/tool_call 为展示性记录（tool_call 的 content 常为 None），
+        # 混入会产生 "None" 噪音；tool 记录保留（含事实结果）
+        summary_messages = [
+            m for m in messages
+            if m.get("role") not in ("thinking", "tool_call")
+        ]
+        chunks = _split_into_chunks(summary_messages)
         partials: list[str] = []
         for chunk in chunks:
             rendered = "\n".join(

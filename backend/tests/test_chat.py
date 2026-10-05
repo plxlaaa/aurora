@@ -143,14 +143,20 @@ class TestParseBareJsonCalls(unittest.TestCase):
         self.assertEqual(json.loads(calls[0]["function"]["arguments"]), {"code": "print(1)"})
 
     def test_with_trailing_notes(self):
+        # 收窄后的行为：JSON 夹杂说明文字不再触发兜底（防模型举例误调用），
+        # 仅整段恰好是一个 JSON 对象时才解析
         text = '{"name": "read_skill", "arguments": {"name": "weather"}}\n（调用工具查询）'
-        calls = parse_bare_json_calls(text)
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["function"]["name"], "read_skill")
+        self.assertEqual(parse_bare_json_calls(text), [])
 
     def test_nested_arguments(self):
+        # 同上：正文夹杂 JSON 不再解析
         text = '前言 {"name": "t", "arguments": {"a": {"b": 1}}} 后记'
+        self.assertEqual(parse_bare_json_calls(text), [])
+
+    def test_pure_object_with_nested_arguments(self):
+        text = '{"name": "t", "arguments": {"a": {"b": 1}}}'
         calls = parse_bare_json_calls(text)
+        self.assertEqual(len(calls), 1)
         self.assertEqual(json.loads(calls[0]["function"]["arguments"]), {"a": {"b": 1}})
 
     def test_missing_arguments_defaults_empty(self):
