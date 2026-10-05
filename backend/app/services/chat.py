@@ -14,8 +14,10 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import Any, Awaitable, Callable
 
+from ..core.hooks import HookBus
 from .compress import ContextCompressor
 from .llm import ModelRegistry
 from .tool_registry import ToolRegistry
@@ -166,11 +168,18 @@ class ChatPipeline:
         vision: VisionRouter,
         compressor: ContextCompressor,
         tools: ToolRegistry,
+        hooks: "HookBus | None" = None,
     ) -> None:
         self.registry = registry
         self.vision = vision
         self.compressor = compressor
         self.tools = tools
+        # 事件钩子总线（可选；无插件时零开销）
+        self.hooks = hooks
+
+    async def _emit(self, event: str, payload: dict[str, Any]) -> None:
+        if self.hooks is not None:
+            await self.hooks.emit(event, payload)
 
     def collect_tools(self) -> list[dict[str, Any]]:
         return self.tools.collect_tools()
@@ -181,6 +190,7 @@ class ChatPipeline:
         attachments: list[dict[str, Any]],
         sink: DeltaSink,
         *,
+        session_id: str | None = None,
         force_compress: bool = False,
         temperature: float = 0.7,
         model_name: str | None = None,
@@ -189,6 +199,14 @@ class ChatPipeline:
         client = self.registry.get("main")
         if client is None:
             raise RuntimeError("主模型端点未配置")
+
+        _started = time.monotonic()
+        _ep_info = getattr(client, "info", None)
+        await self._emit("generate.start", {
+            "session_id": session_id,
+            "model": model_name or getattr(_ep_info, "model_name", "unknown"),
+            "temperature": temperature,
+        })
 
         def cancelled() -> bool:
             return cancel is not None and cancel.is_set()
@@ -215,8 +233,12 @@ class ChatPipeline:
         if force_compress or self.compressor.should_compress(messages):
             logger.info("触发上下文压缩")
             await sink({"type": "tool_call", "name": "compress", "status": "running", "arguments": {}})
+            before_count = len(messages)
             messages = await self.compressor.compress(messages)
             await sink({"type": "tool_call", "name": "compress", "status": "done", "arguments": {}, "result": "已完成摘要压缩"})
+            await self._emit("compress.done", {
+                "session_id": session_id, "before": before_count, "after": len(messages),
+            })
 
         # 3+4. 主模型推理 + 工具循环
         tools = self.collect_tools()
@@ -307,15 +329,36 @@ class ChatPipeline:
                     ]
                 if not react_calls:
                     await sink({"type": "done"})
+                    await self._emit("generate.end", {
+                        "session_id": session_id,
+                        "content": full_content,
+                        "cancelled": False,
+                        "rounds": _round + 1,
+                        "duration_ms": int((time.monotonic() - _started) * 1000),
+                    })
                     return {"done": True, "content": full_content}
-                await self._execute_tools(react_calls, history, sink, cancel, native=False)
+                await self._execute_tools(react_calls, history, sink, cancel, native=False, session_id=session_id)
             else:
-                await self._execute_tools(completed_calls, history, sink, cancel, native=True)
+                await self._execute_tools(completed_calls, history, sink, cancel, native=True, session_id=session_id)
             if cancelled():
                 await sink({"type": "cancelled"})
+                await self._emit("generate.end", {
+                    "session_id": session_id,
+                    "content": full_content,
+                    "cancelled": True,
+                    "rounds": _round + 1,
+                    "duration_ms": int((time.monotonic() - _started) * 1000),
+                })
                 return {"done": True, "cancelled": True}
 
         await sink({"type": "done", "result": "达到最大工具调用轮次"})
+        await self._emit("generate.end", {
+            "session_id": session_id,
+            "content": full_content,
+            "cancelled": False,
+            "rounds": MAX_TOOL_ROUNDS,
+            "duration_ms": int((time.monotonic() - _started) * 1000),
+        })
         return {"done": True}
 
     @staticmethod
@@ -335,6 +378,7 @@ class ChatPipeline:
         cancel: asyncio.Event | None = None,
         *,
         native: bool = True,
+        session_id: str | None = None,
     ) -> None:
         """执行模型请求的工具调用并回填历史。
 
@@ -373,6 +417,10 @@ class ChatPipeline:
                 "arguments": arguments,
             })
             status = "done"
+            _tool_started = time.monotonic()
+            await self._emit("tool.before", {
+                "session_id": session_id, "name": name, "arguments": arguments,
+            })
             try:
                 result = await self.tools.dispatch(name, arguments)
                 if isinstance(result, dict) and result.get("error"):
@@ -381,6 +429,13 @@ class ChatPipeline:
                 logger.warning("工具 %s 调用失败: %s", name, exc)
                 result = {"error": f"工具调用失败: {exc}"}
                 status = "error"
+            await self._emit("tool.after", {
+                "session_id": session_id,
+                "name": name,
+                "ok": status != "error",
+                "duration_ms": int((time.monotonic() - _tool_started) * 1000),
+                "error": str(result.get("error")) if isinstance(result, dict) and result.get("error") else None,
+            })
             await sink(
                 {
                     "type": "tool_call",

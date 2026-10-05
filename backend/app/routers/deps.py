@@ -10,11 +10,13 @@ import logging
 
 from ..core import auth
 from ..core.config import settings
+from ..core.hooks import HookBus
 from ..services.chat import ChatPipeline
 from ..services.compress import ContextCompressor
 from ..services.custom_tools import CustomToolsManager
 from ..services.llm import ModelRegistry
 from ..services.mcp_client import MCPManager
+from ..services.plugins import load_builtin_plugins
 from ..services.sandbox import Executor
 from ..services.sessions import SessionStore
 from ..services.skills import SkillsManager
@@ -29,6 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger("aiassistant.gateway")
 
 # -- 全局单例 --
+hooks = HookBus()
 registry = ModelRegistry(settings)
 vision = VisionRouter(settings, registry)
 compressor = ContextCompressor(settings, registry)
@@ -38,14 +41,19 @@ executor = Executor(settings)
 custom_tools = CustomToolsManager(settings.config_dir, executor=executor)
 tool_registry = ToolRegistry(skills_mgr, mcp_mgr, custom_tools, executor=executor)
 sessions = SessionStore()
-pipeline = ChatPipeline(registry, vision, compressor, tool_registry)
+pipeline = ChatPipeline(registry, vision, compressor, tool_registry, hooks=hooks)
+# 内置插件（启动时填充）：{name: instance}
+plugins: dict = {}
 
 
 async def startup() -> None:
+    global plugins
+    plugins.update(load_builtin_plugins(hooks, sessions, registry))
     await registry.probe_all()
     mcp_status = await mcp_mgr.connect_all()
     logger.info("MCP 连接: %s", ", ".join(mcp_status))
     logger.info("端点探测: %s", registry.snapshot())
+    logger.info("钩子订阅: %s", hooks.snapshot())
 
 
 async def shutdown() -> None:

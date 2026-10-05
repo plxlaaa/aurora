@@ -77,6 +77,11 @@ class SessionStore:
         except Exception:
             pass
 
+    def has_custom_title(self, session_id: str) -> bool:
+        """用户是否已自定义标题（自动命名等插件据此决定是否介入）。"""
+        with self._lock:
+            return session_id in self._titles
+
     def rename(self, session_id: str, title: str) -> None:
         """设置自定义会话标题；传空串则清除自定义标题。"""
         with self._lock:

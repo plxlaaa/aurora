@@ -54,9 +54,11 @@ from .deps import (
     compressor,
     custom_tools,
     executor,
+    hooks,
     logger,
     mcp_mgr,
     pipeline,
+    plugins,
     registry,
     sessions,
     settings,
@@ -643,6 +645,17 @@ async def login(payload: dict[str, Any], request: Request) -> dict[str, Any]:
     raise HTTPException(status_code=401, detail="凭据无效")
 
 
+# ---------- 统计 ----------
+@router.get("/api/stats")
+async def get_stats(_: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
+    """用量统计快照（内置 stats 插件）+ 钩子订阅清单。"""
+    stats = plugins.get("stats")
+    return {
+        "stats": stats.snapshot() if stats else {},
+        "hooks": hooks.snapshot(),
+    }
+
+
 # ---------- WebSocket ----------
 # 附件数据缓存（object_id -> 原始字节）；LRU 上限防内存泄漏
 _ATTACH_CACHE_MAX = 32
@@ -764,6 +777,7 @@ async def chat(ws: WebSocket) -> None:
                 history,
                 resolved,
                 sink,
+                session_id=session_id,
                 force_compress=force_compress,
                 temperature=conn_temperature,
                 model_name=conn_model,
@@ -773,6 +787,7 @@ async def chat(ws: WebSocket) -> None:
             raise
         except Exception as exc:  # noqa: BLE001
             logger.exception("对话处理失败")
+            await hooks.emit("generate.error", {"session_id": session_id, "error": str(exc)})
             try:
                 await ws.send_json({"type": "error", "message": str(exc)})
             except Exception:  # noqa: BLE001
