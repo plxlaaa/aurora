@@ -131,6 +131,18 @@ class TestDispatch(unittest.IsolatedAsyncioTestCase):
         result = await reg.dispatch("read_skill", {"name": "weather"})
         self.assertEqual(result["name"], "weather")
 
+    async def test_dispatch_read_skill_alias_keys(self):
+        # 模型键名变体兼容：skill / skill_name 均可
+        reg = make_registry()
+        self.assertEqual((await reg.dispatch("read_skill", {"skill": "weather"}))["name"], "weather")
+        self.assertEqual((await reg.dispatch("read_skill", {"skill_name": "weather"}))["name"], "weather")
+
+    async def test_dispatch_run_skill_alias_and_flat_args(self):
+        # run_skill：skill 别名 + arguments 缺失时其余字段视为 skill 参数
+        reg = make_registry()
+        result = await reg.dispatch("run_skill", {"skill": "weather", "city": "北京"})
+        self.assertEqual(result["result"], "weather:北京")
+
     async def test_dispatch_builtin_run_skill(self):
         reg = make_registry()
         result = await reg.dispatch("run_skill", {"name": "weather", "arguments": {"city": "北京"}})

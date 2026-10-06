@@ -77,6 +77,13 @@ class TestParseReactCalls(unittest.TestCase):
     def test_no_marker(self):
         self.assertEqual(parse_react_calls("普通回复，没有调用。"), [])
 
+    def test_flat_top_level_arguments(self):
+        # 模型变体：参数平铺在顶层而非嵌套在 arguments 里
+        text = '<tool_call>{"name": "read_skill", "skill": "weather"}</tool_call>'
+        calls = parse_react_calls(text)
+        self.assertEqual(calls[0]["function"]["name"], "read_skill")
+        self.assertEqual(json.loads(calls[0]["function"]["arguments"]), {"skill": "weather"})
+
     def test_multiline_arguments(self):
         text = '<tool_call>{\n  "name": "run_code",\n  "arguments": {"code": "print(1)"}\n}</tool_call>'
         calls = parse_react_calls(text)

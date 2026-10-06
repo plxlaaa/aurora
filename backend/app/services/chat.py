@@ -73,6 +73,14 @@ def _payload_to_call(payload: Any) -> dict[str, Any] | None:
     if not name:
         return None
     args: Any = next((payload[k] for k in _CALL_ARGS_KEYS if k in payload), None)
+    if args is None:
+        # 参数平铺在顶层（模型常见变体，如 {"name": "read_skill", "skill": "weather"}）：
+        # 除名称键外的其余标量/容器字段都视为参数
+        flat = {
+            k: v for k, v in payload.items()
+            if k not in _CALL_NAME_KEYS and k not in _CALL_ARGS_KEYS
+        }
+        args = flat if flat else {}
     if isinstance(args, str):
         # 双重编码：arguments 实为 JSON 字符串，尝试还原为对象
         try:

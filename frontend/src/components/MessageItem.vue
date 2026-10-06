@@ -40,8 +40,8 @@
       </div>
     </template>
 
-    <!-- 思考过程（可折叠） -->
-    <template v-else-if="message.role === 'thinking'">
+    <!-- 思考过程（可折叠；空内容不渲染，避免空气泡） -->
+    <template v-else-if="message.role === 'thinking' && (message.content || '').trim()">
       <div class="row">
         <span class="avatar ai-avatar">AI</span>
         <div class="body-col">
@@ -71,7 +71,14 @@
             </span>
           </div>
           <div v-if="hasResult" class="tool-result">
-            <pre class="tool-result-body">{{ resultText }}</pre>
+            <!-- JSON 对象渲染为键值表，其余保持原文 -->
+            <div v-if="resultRows" class="tool-result-body kv">
+              <div v-for="(row, i) in resultRows" :key="i" class="kv-row">
+                <span class="kv-key">{{ row.k }}</span>
+                <span class="kv-val" :title="row.v">{{ row.v }}</span>
+              </div>
+            </div>
+            <pre v-else class="tool-result-body">{{ resultText }}</pre>
           </div>
         </div>
       </div>
@@ -95,9 +102,17 @@
       <div class="info-row">{{ message.content }}</div>
     </template>
 
-    <!-- 错误 -->
+    <!-- 错误（人性化文案 + 重试入口） -->
     <template v-else-if="message.role === 'error'">
-      <div class="info-row error">[错误] {{ message.content }}</div>
+      <div class="error-card">
+        <div class="error-main">
+          <span class="error-icon">⚠</span>
+          <span>{{ friendlyError }}</span>
+        </div>
+        <button class="retry-btn" :disabled="streaming" @click="$emit('regenerate')">
+          ↻ 重试
+        </button>
+      </div>
     </template>
 
     <!-- 助手消息 -->
@@ -105,7 +120,11 @@
       <div class="row">
         <span class="avatar ai-avatar">AI</span>
         <div class="body-col">
-          <div class="bubble assistant-bubble">
+          <!-- 等待首字：打字指示器，避免空气泡像卡死 -->
+          <div v-if="!assistantText && streaming" class="bubble assistant-bubble typing">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          </div>
+          <div v-else class="bubble assistant-bubble">
             <MarkdownText :text="assistantText" :streaming="streaming" />
             <span v-if="streaming" class="cursor">▍</span>
           </div>
@@ -202,6 +221,40 @@ const resultText = computed(() => {
   } catch {
     return String(r)
   }
+})
+
+// 扁平 JSON 对象 → 键值行（嵌套/数组/超长文本回退原文渲染）
+const resultRows = computed(() => {
+  const r = props.message.result
+  if (!r || typeof r !== 'object' || Array.isArray(r)) return null
+  const entries = Object.entries(r)
+  if (!entries.length || entries.length > 12) return null
+  const rows = []
+  for (const [k, v] of entries) {
+    const s = typeof v === 'string' ? v : JSON.stringify(v)
+    if (s.length > 120) return null // 含长文本则回退原文，避免表格里截断关键信息
+    rows.push({ k, v: s })
+  }
+  return rows
+})
+
+// 错误文案人性化：技术报错翻译成人话，原文放 title 供排查
+const friendlyError = computed(() => {
+  const raw = String(props.message.content || '未知错误')
+  const lower = raw.toLowerCase()
+  let text = raw
+  if (lower.includes('all connection attempts failed') || lower.includes('econnrefused')) {
+    text = '连接不上模型服务，请检查网络后重试'
+  } else if (lower.includes('502') || lower.includes('503') || lower.includes('所有渠道均失败')) {
+    text = '上游服务暂时不可用，稍等片刻再重试'
+  } else if (lower.includes('403') || lower.includes('限流') || lower.includes('429')) {
+    text = '请求被限流或拒绝，稍等片刻再重试'
+  } else if (lower.includes('timeout') || lower.includes('超时')) {
+    text = '请求超时，请重试'
+  } else if (lower.includes('未授权') || lower.includes('401')) {
+    text = '登录状态已失效，请重新登录'
+  }
+  return text
 })
 
 function trimResult(text) {
@@ -521,6 +574,119 @@ function setFeedback(v) {
   color: var(--err);
   background: var(--err-bg);
   border-color: var(--err);
+}
+
+/* 错误卡片：人性化文案 + 重试 */
+.error-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--err-bg);
+  border: 1px solid var(--err);
+  border-radius: 10px;
+  padding: 6px 12px;
+  margin: 0 auto;
+}
+
+.error-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--err);
+  font-size: 12.5px;
+}
+
+.error-icon {
+  font-size: 13px;
+}
+
+.retry-btn {
+  border: 1px solid var(--err);
+  background: transparent;
+  color: var(--err);
+  font-size: 12px;
+  border-radius: 6px;
+  padding: 3px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.retry-btn:hover:not(:disabled) {
+  background: var(--err);
+  color: #fff;
+}
+
+.retry-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 打字指示器：三点跳动 */
+.typing {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 12px 16px;
+}
+
+.typing .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  animation: dot-bounce 1.2s ease-in-out infinite;
+}
+
+.typing .dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.typing .dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes dot-bounce {
+  0%, 60%, 100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  30% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+/* 工具结果键值表 */
+.tool-result-body.kv {
+  padding: 4px 0;
+  white-space: normal;
+}
+
+.kv-row {
+  display: flex;
+  gap: 8px;
+  padding: 2px 10px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.kv-row + .kv-row {
+  border-top: 1px dashed var(--border);
+}
+
+.kv-key {
+  flex: 0 0 auto;
+  min-width: 72px;
+  color: var(--text-weak);
+  font-weight: 500;
+}
+
+.kv-val {
+  color: var(--text);
+  word-break: break-all;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 移动端适配 */

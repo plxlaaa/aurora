@@ -158,14 +158,27 @@ class ToolRegistry:
         )
 
     # -- 执行分发 --
+    @staticmethod
+    def _arg(arguments: dict[str, Any], *keys: str) -> str:
+        """按优先级取字符串参数，兼容模型的键名变体（如 skill/skill_name → name）。"""
+        for k in keys:
+            v = arguments.get(k)
+            if isinstance(v, str) and v.strip():
+                return v
+        return ""
+
     async def dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name == "read_skill":
-            return self.skills.read_skill(str(arguments.get("name", "")))
+            return self.skills.read_skill(self._arg(arguments, "name", "skill", "skill_name"))
         if name == "run_skill":
-            skill_name = str(arguments.get("name", ""))
+            skill_name = self._arg(arguments, "name", "skill", "skill_name")
             skill_args = arguments.get("arguments")
             if not isinstance(skill_args, dict):
-                skill_args = {}
+                # arguments 缺失时，把除名称键外的其余字段当作 skill 参数
+                skill_args = {
+                    k: v for k, v in arguments.items()
+                    if k not in ("name", "skill", "skill_name")
+                }
             return await self.skills.execute(skill_name, skill_args)
         if name == "run_code":
             code = str(arguments.get("code", ""))

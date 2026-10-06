@@ -443,13 +443,16 @@ function handleMessage(raw) {
       appendThinking(data.text || data.content || '')
       break
     case 'tool_call':
+      dropEmptyTyping()
       upsertToolCall(data)
       break
     case 'tool':
+      dropEmptyTyping()
       upsertToolResult(data)
       break
     case 'tool_result':
       // 文本协议结果回填：与后端落盘格式保持一致，渲染为工具卡片
+      dropEmptyTyping()
       messages.value.push({
         id: nextId(),
         role: 'user',
@@ -462,11 +465,13 @@ function handleMessage(raw) {
     case 'error':
       endStreaming()
       finishPendingTools()
+      dropEmptyTyping()
       messages.value.push({ id: nextId(), role: 'error', content: data.message || '未知错误' })
       break
     case 'cancelled':
       endStreaming()
       finishPendingTools()
+      dropEmptyTyping()
       messages.value.push({ id: nextId(), role: 'info', content: '已停止生成' })
       loadSessions()
       break
@@ -498,14 +503,33 @@ function appendDelta(text) {
   if (last && last.role === 'assistant') {
     typingMsg = last
   } else {
-    typingMsg = { id: nextId(), role: 'assistant', content: '' }
-    messages.value.push(typingMsg)
+    // 同样存代理引用，保证 typewriter 响应式
+    const idx = messages.value.push({ id: nextId(), role: 'assistant', content: '' }) - 1
+    typingMsg = messages.value[idx]
   }
   typeBuffer += text
   if (!typeTimer) {
     typeEnded = false
     typeTimer = setInterval(typeTick, TYPE_TICK_MS)
   }
+}
+
+/* 立即显示「生成中」打字指示：不等首 token，避免发送后助手区空白 */
+function showTypingPlaceholder() {
+  if (typingMsg) return
+  // 存 reactive 代理而非 raw 对象：typewriter 的原地修改必须触发响应式
+  const idx = messages.value.push({ id: nextId(), role: 'assistant', content: '' }) - 1
+  typingMsg = messages.value[idx]
+}
+
+/* 工具调用/结果到达时收起空的占位气泡（工具卡片已足够表达进行中） */
+function dropEmptyTyping() {
+  if (typingMsg && !typingMsg.content) {
+    const idx = messages.value.findIndex((m) => m.id === typingMsg.id)
+    if (idx >= 0) messages.value.splice(idx, 1)
+  }
+  typingMsg = null
+  stopTypeTimer()
 }
 
 function stopTypeTimer() {
@@ -638,6 +662,7 @@ async function regenerate() {
   if (lastUserIdx < 0) return
   messages.value.splice(lastUserIdx + 1)
   streaming.value = true
+  showTypingPlaceholder()
   ensureSocketAndSend({ type: 'regenerate' })
   scrollToBottom(true)
 }
@@ -904,6 +929,7 @@ async function send() {
   input.value = ''
   pendingAttachments.value = []
   streaming.value = true
+  showTypingPlaceholder()
   nextTick(() => {
     // 清空后复位输入框高度，否则会保留多行时撑开的尺寸
     const el = inputEl.value

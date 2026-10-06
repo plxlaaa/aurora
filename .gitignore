@@ -17,3 +17,4 @@ logs/
 # OS
 .DS_Store
 config/*.local.yaml
+.shots/
