@@ -2,6 +2,9 @@
 
 读取 /opt/aiassistant/config 下的 YAML（models / sandbox / mcp），
 提供字典访问与重新加载能力。配置变更后调用 reload() 热刷新。
+
+密钥分层：`<name>.yaml` 为入库模板；`<name>.local.yaml` 为本机私有覆盖
+（深合并、不入 git），真实 api_key / base_url 建议只写在 local 层。
 """
 from __future__ import annotations
 
@@ -16,6 +19,16 @@ import yaml
 CONFIG_DIR = os.environ.get("AI_ASSISTANT_CONFIG_DIR", "/opt/aiassistant/config")
 
 
+def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    """递归合并 patch 到 base（就地修改 base 并返回）。"""
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
 class Settings:
     def __init__(self, config_dir: str = CONFIG_DIR) -> None:
         self.config_dir = config_dir
@@ -27,13 +40,21 @@ class Settings:
         with self._lock:
             loaded: dict[str, dict[str, Any]] = {}
             for name in ("models", "sandbox", "mcp"):
+                data: dict[str, Any] = {}
                 path = os.path.join(self.config_dir, f"{name}.yaml")
                 if os.path.exists(path):
                     with open(path, encoding="utf-8") as fh:
                         data = yaml.safe_load(fh) or {}
-                    loaded[name] = data if isinstance(data, dict) else {}
-                else:
-                    loaded[name] = {}
+                    if not isinstance(data, dict):
+                        data = {}
+                # 本机覆盖层（密钥/私有端点），深合并；文件不存在则跳过
+                local_path = os.path.join(self.config_dir, f"{name}.local.yaml")
+                if os.path.exists(local_path):
+                    with open(local_path, encoding="utf-8") as fh:
+                        local = yaml.safe_load(fh) or {}
+                    if isinstance(local, dict):
+                        _deep_merge(data, local)
+                loaded[name] = data
             self._data = loaded
 
     # -- 通用访问 --

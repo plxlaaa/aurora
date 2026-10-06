@@ -1,0 +1,4 @@
+# 本机私有覆盖层（不入 git）：沙箱无 docker，切 local 执行模式
+mode: local
+local:
+  allow: true

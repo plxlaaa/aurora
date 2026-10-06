@@ -15,6 +15,11 @@ import httpx
 
 logger = logging.getLogger("aiassistant.llm")
 
+# 瞬时错误重试：公益站常见限流/网关抖动（403 WAF / 429 / 5xx），退避后重试一次
+_TRANSIENT_STATUS = {403, 408, 429, 500, 502, 503, 504}
+_TRANSIENT_MAX = 2
+_TRANSIENT_BACKOFF = 3.0
+
 DEFAULT_TIMEOUT = 120.0
 
 
@@ -132,6 +137,7 @@ class LLMClient:
     ) -> dict[str, Any]:
         """非流式补全，返回 OpenAI 格式响应。"""
         model = model_name or self.info.model_name
+        transient_retries = 0
         while True:
             use_tools = tools
             if use_tools and model in self._tools_blocked:
@@ -152,6 +158,14 @@ class LLMClient:
                 if self._maybe_retry_without_tools(resp, body, model):
                     continue
                 raise self._http_error(resp, body)
+            if resp.status_code in _TRANSIENT_STATUS and transient_retries < _TRANSIENT_MAX:
+                transient_retries += 1
+                logger.warning(
+                    "端点瞬时错误 HTTP %s，%ss 后重试(%s/%s): %s",
+                    resp.status_code, _TRANSIENT_BACKOFF, transient_retries, _TRANSIENT_MAX, model,
+                )
+                await asyncio.sleep(_TRANSIENT_BACKOFF)
+                continue
             if resp.status_code >= 400:
                 raise self._http_error(resp, resp.content)
             return resp.json()
@@ -167,6 +181,7 @@ class LLMClient:
     ) -> AsyncIterator[dict[str, Any]]:
         """流式补全，逐块 yield SSE 解析后的 JSON 字典。"""
         model = model_name or self.info.model_name
+        stream_retries = 0
         while True:
             use_tools = tools
             if use_tools and model in self._tools_blocked:
@@ -189,6 +204,14 @@ class LLMClient:
                     if self._maybe_retry_without_tools(resp, body, model):
                         continue
                     raise self._http_error(resp, body)
+                if resp.status_code in _TRANSIENT_STATUS and stream_retries < _TRANSIENT_MAX:
+                    stream_retries += 1
+                    logger.warning(
+                        "流式瞬时错误 HTTP %s，%ss 后重试(%s/%s): %s",
+                        resp.status_code, _TRANSIENT_BACKOFF, stream_retries, _TRANSIENT_MAX, model,
+                    )
+                    await asyncio.sleep(_TRANSIENT_BACKOFF)
+                    continue
                 if resp.status_code >= 400:
                     raise self._http_error(resp, await resp.aread())
                 async for line in resp.aiter_lines():

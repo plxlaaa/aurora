@@ -297,7 +297,30 @@ class ChatPipeline:
 
             if interrupted:
                 await sink({"type": "cancelled"})
+                await self._emit("generate.end", {
+                    "session_id": session_id,
+                    "content": full_content,
+                    "cancelled": True,
+                    "rounds": _round + 1,
+                    "duration_ms": int((time.monotonic() - _started) * 1000),
+                })
                 return {"done": True, "cancelled": True, "content": full_content}
+
+            # 空流自愈：部分公益站流式端点会丢正文（SSE 只有 finish 没有内容块）。
+            # 降级为非流式重试一次，把完整回复作为单个 delta 吐出，避免用户看到空气回复。
+            if not full_content and not pending_calls:
+                logger.warning("流式返回为空（疑似上游丢正文），降级非流式重试")
+                resp = await client.chat_completion(
+                    history, tools=tools or None, temperature=temperature,
+                    model_name=model_name,
+                )
+                try:
+                    fallback_text = str(resp["choices"][0]["message"]["content"] or "")
+                except (KeyError, IndexError, TypeError):
+                    fallback_text = ""
+                if fallback_text:
+                    full_content = fallback_text
+                    await sink({"type": "delta", "text": fallback_text})
 
             # 按 index 顺序还原工具调用，保持与模型输出一致
             completed_calls = [
