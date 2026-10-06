@@ -11,8 +11,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault("AI_ASSISTANT_DATA_DIR", tempfile.mkdtemp(prefix="aurora-hooks-"))
 
 from app.core.hooks import HookBus  # noqa: E402
-from app.services.plugins.auto_title import AutoTitlePlugin  # noqa: E402
+from app.services.plugins.auto_title import AutoTitlePlugin, clean_title  # noqa: E402
 from app.services.plugins.stats import StatsPlugin  # noqa: E402
+
+
+class TestCleanTitle(unittest.TestCase):
+    def test_plain(self):
+        self.assertEqual(clean_title("北京天气查询"), "北京天气查询")
+
+    def test_takes_first_line(self):
+        self.assertEqual(clean_title("北京天气\n这是解释"), "北京天气")
+
+    def test_strips_quotes_and_prefix(self):
+        self.assertEqual(clean_title("「标题：天气查询」"), "天气查询")
+        self.assertEqual(clean_title("我注意到您想查询北京"), "您想查询北京")
+
+    def test_cuts_at_punctuation(self):
+        self.assertEqual(clean_title("查询北京的天气，还问温度"), "查询北京的天气")
+
+    def test_truncates_to_limit(self):
+        self.assertLessEqual(len(clean_title("这是一个非常非常非常长的标题内容")), 12)
+
+    def test_empty(self):
+        self.assertEqual(clean_title(""), "")
 
 
 class TestHookBus(unittest.TestCase):

@@ -17,6 +17,41 @@ logger = logging.getLogger("aiassistant.plugins.auto_title")
 
 MAX_TITLE_LEN = 12
 
+TITLE_PROMPT = (
+    "你是标题生成器。根据用户的第一句话，输出一个不超过10个字的名词短语标题，"
+    "概括对话主题。\n"
+    "硬性要求：\n"
+    "1. 只输出标题文本，禁止输出任何解释、思考过程、寒暄或前缀（如「标题：」）；\n"
+    "2. 用名词短语，不用完整句子（正确示例：北京天气查询；错误示例：用户想查询北京的天气）；\n"
+    "3. 不加引号、句号或任何标点结尾；\n"
+    "4. 用户问什么就概括什么，不要说「我」「用户」「您」之类的人称。"
+)
+
+# 常见口癖/前缀：模型不听话时兜底清洗
+_STRIP_PREFIXES = (
+    "标题：", "标题:", "好的，", "好的,", "我注意到", "用户想", "用户询问",
+    "这是", "关于",
+)
+
+
+def clean_title(raw: str) -> str:
+    """清洗模型输出：取首个有效行、去引号与前缀、截断到限长。"""
+    line = next(
+        (ln.strip() for ln in raw.splitlines() if ln.strip()),
+        "",
+    )
+    line = line.strip().strip('"「」《》\'\'').strip()
+    for prefix in _STRIP_PREFIXES:
+        if line.startswith(prefix):
+            line = line[len(prefix):].strip()
+    # 句子式输出（含句号/问号）截到第一个标点
+    for sep in ("。", "，", "！", "？", "；", ".", ",", "!", "?", ";"):
+        if sep in line:
+            line = line.split(sep)[0]
+            break
+    line = line.strip().strip('"「」《》\'\'').strip()
+    return line.replace("\n", "")[:MAX_TITLE_LEN]
+
 
 class AutoTitlePlugin:
     """把「首条消息截断」的默认标题升级为 LLM 概括标题。
@@ -69,21 +104,18 @@ class AutoTitlePlugin:
             resp = await asyncio.wait_for(
                 client.chat_completion(
                     [
-                        {"role": "system", "content": (
-                            "根据用户第一句话为对话起一个标题：不超过12个字、"
-                            "概括话题、不加引号和句号、直接输出标题本身。"
-                        )},
+                        {"role": "system", "content": TITLE_PROMPT},
                         {"role": "user", "content": first_user[:200]},
                     ],
-                    max_tokens=32,
-                    temperature=0.3,
+                    max_tokens=48,
+                    temperature=0.2,
                 ),
                 timeout=20,
             )
-            title = str(
+            raw = str(
                 resp.get("choices", [{}])[0].get("message", {}).get("content", "")
-            ).strip().strip('"「」《》')
-            title = title.replace("\n", "")[:MAX_TITLE_LEN]
+            )
+            title = clean_title(raw)
             if title:
                 self._sessions.rename(session_id, title)
                 logger.info("自动命名: %s -> %s", session_id, title)
