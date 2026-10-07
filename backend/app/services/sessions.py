@@ -107,16 +107,41 @@ class SessionStore:
         with self._lock:
             return self._status.get(session_id, self.STATUS_IDLE)
 
+    def get_meta(self, session_id: str) -> dict[str, Any] | None:
+        """定点查询单个会话的列表元信息（不含 mtime）；不存在返回 None。
+
+        供会话导出等只需单个会话元信息的场景使用：相比 `list_sessions()`
+        遍历全量会话逐个匹配，这里只读取目标文件，开销与会话总数无关。
+        """
+        with self._lock:
+            safe = self._safe_name(session_id)
+            if not safe:
+                return None
+            entry = self._scan_file(self.data_dir / f"{safe}.jsonl", safe)
+            if entry is None:
+                return None
+            entry.pop("mtime", None)
+            return entry
+
     def mark_running(self, session_id: str) -> None:
         self.set_status(session_id, self.STATUS_RUNNING)
 
     def mark_completed(self, session_id: str) -> None:
         self.set_status(session_id, self.STATUS_COMPLETED)
 
+    @staticmethod
+    def _safe_name(session_id: str) -> str:
+        """将外部传入的 id 收敛为安全文件名主干；空结果表示非法。
+
+        仅保留字母数字与 -_（与既有会话 id 形态一致），杜绝路径穿越。
+        过滤后为空（例如 ".." 或 "///"）时返回空串，由调用方拒绝，
+        避免退化成 ".jsonl" 这类共享文件造成会话互相覆盖。
+        """
+        return "".join(c for c in str(session_id) if c.isalnum() or c in "-_")
+
     def _path(self, session_id: str) -> Path:
-        # 仅允许由我们生成的 session id 形态，防路径穿越
-        safe = "".join(c for c in session_id if c.isalnum() or c in "-_")
-        return self.data_dir / f"{safe}.jsonl"
+        #仅允许由我们生成的 session id 形态，防路径穿越
+        return self.data_dir / f"{self._safe_name(session_id)}.jsonl"
 
     def create(self) -> str:
         """创建会话并立即落盘空文件，确保新会话在列表中可见。"""
@@ -130,6 +155,8 @@ class SessionStore:
 
     def exists(self, session_id: str) -> bool:
         with self._lock:
+            if not self._safe_name(session_id):
+                return False
             return self._path(session_id).exists()
 
     def append(self, session_id: str, message: dict[str, Any]) -> None:
@@ -213,6 +240,8 @@ class SessionStore:
 
     def _load_unlocked(self, session_id: str) -> list[dict[str, Any]]:
         """读取会话文件（须持有锁；不触发 pending 合并，纯文件内容）。"""
+        if not self._safe_name(session_id):
+            return []
         path = self._path(session_id)
         if not path.exists():
             return []

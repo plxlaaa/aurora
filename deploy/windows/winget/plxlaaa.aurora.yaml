@@ -1,0 +1,47 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifestSchema.json",
+  "PackageIdentifier": "plxlaaa.aurora",
+  "PackageVersion": "1.2.0",
+  "DefaultLocale": "zh-CN",
+  "Publisher": "plxlaaa",
+  "PublisherUrl": "https://github.com/plxlaaa",
+  "Author": "plxlaaa",
+  "License": "MIT",
+  "LicenseUrl": "https://github.com/plxlaaa/aurora/blob/main/LICENSE",
+  "ProjectUrl": "https://github.com/plxlaaa/aurora",
+  "ReleaseNotesUrl": "https://github.com/plxlaaa/aurora/blob/main/CHANGELOG.md",
+  "Tags": [
+    "ai",
+    "assistant",
+    "llm",
+    "fastapi",
+    "self-hosted",
+    "webui"
+  ],
+  "Commands": [
+    {
+      "Name": "aurora",
+      "Description": "启动 Aurora AI 智能助手网关",
+      "Executable": "backend\\venv\\Scripts\\uvicorn.exe",
+      "Arguments": "app.main:app --host 127.0.0.1 --port 8080",
+      "WorkingDirectory": "backend"
+    }
+  ],
+  "Installers": [
+    {
+      "InstallerType": "zip",
+      "Architecture": "x64",
+      "DownloadUrl": "https://github.com/plxlaaa/aurora/releases/download/v1.2.0/aurora-1.2.0-windows-amd64.zip",
+      "InstallerSwitches": {
+        "Custom": "--no-systemd --skip-venv"
+      },
+      "Platform": "Windows"
+    }
+  ],
+  "Dependencies": {
+    "Python": {
+      "PackageIdentifier": "Python.Python.3.12",
+      "MinimumVersion": "3.10.0"
+    }
+  }
+}

@@ -618,13 +618,16 @@ async def export_session(
 ) -> Response:
     """导出会话为 Markdown 或 JSON 文件。"""
     import json as _json
+    if format not in ("md", "json"):
+        raise ValidationError("format 仅支持 md 或 json")
+    if not sessions.exists(session_id):
+        raise NotFoundError("会话不存在")
     sessions.collapse_deltas(session_id)
     messages = sessions.load(session_id)
     if not messages:
         raise NotFoundError("会话不存在或为空")
-    meta = next(
-        (s for s in sessions.list_sessions() if s["id"] == session_id), {}
-    )
+    # 定点取元信息，避免为导出单个会话而全量扫描所有会话文件
+    meta = sessions.get_meta(session_id) or {}
     title = str(meta.get("title") or session_id)
     from urllib.parse import quote
     ascii_name = "".join(c for c in title if c.isascii() and (c.isalnum() or c in "-_ "))[:40].strip() or "session"

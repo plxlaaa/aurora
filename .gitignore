@@ -25,3 +25,6 @@ logs/
 .DS_Store
 config/*.local.yaml
 .shots/
+
+# 打包产物（scripts/package-tarball.sh 与 scripts/package-windows.ps1）
+dist/

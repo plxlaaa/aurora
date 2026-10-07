@@ -122,7 +122,7 @@ ws://host/api/chat?session_id=<id>&token=<api_key|JWT>
   "status": "healthy",
   "ready": true,
   "mode": "sandbox",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "endpoints_available": ["main"],
   "endpoints_total": 3,
   "uptime_hint": "see /api/stats"
@@ -148,6 +148,22 @@ ws://host/api/chat?session_id=<id>&token=<api_key|JWT>
 ```
 
 `ready` 为 `false` 表示所有模型端点均探测失败，此时对话请求会失败，但进程本身存活。
+
+### 请求追踪与日志
+
+所有 HTTP 请求都会返回 `X-Request-ID` 响应头（透传上游同名头，否则自动生成 16 位十六进制值）。
+该id 同时写入响应体错误结构的 `request_id` 字段，并作为上下文绑定到该请求内的全部日志。
+
+开启 `AI_ASSISTANT_LOG_JSON=true` 后日志为每行一条 JSON，便于 Loki / Elasticsearch 采集：
+
+```json
+{"ts":"2026-10-07T02:04:17.725813+00:00","level":"INFO","logger":"aiassistant.http","msg":"GET /api/health -> 200 3ms rid=9c54d883e27c4a5c ip=testclient","request_id":"9c54d883e27c4a5c"}
+```
+
+超过 `AI_ASSISTANT_SLOW_REQUEST_MS`（默认 30000）的请求会额外记录一条 `WARNING` 慢请求日志。
+
+> **v1.2.0 修复**：`AI_ASSISTANT_SLOW_REQUEST_MS` 与 `AI_ASSISTANT_LOG_JSON` 此前虽已定义但未真正生效
+> （前者未下发到中间件、后者未实现），本版本起两项配置均已接线。
 
 ---
 
@@ -341,6 +357,13 @@ ws://host/api/chat?session_id=<id>&token=<api_key|JWT>
 会话 `status` 取值：`idle` / `running` / `completed`。**`running` 期间**压缩、清空、删除、归档会返回 `409 session_busy`。
 
 导出的 Markdown 按角色排版：用户 / 助手小节，工具调用与结果以引用块呈现，思考过程折叠在 `<details>` 中。
+
+> **`format` 参数校验（v1.2.0 起）**：`format` 仅接受 `md`（默认）与 `json`，
+> 其它取值返回 `400 validation_error`（此前任意值都会被静默当作 `md` 处理）。
+> 会话不存在时返回 `404 not_found`。
+
+> **导出性能（v1.2.0 起）**：导出时的标题等元信息通过 `SessionStore.get_meta()`
+> 定点读取目标会话文件，开销与会话总数无关；此前需解析全部会话文件才能定位单个会话。
 
 ---
 

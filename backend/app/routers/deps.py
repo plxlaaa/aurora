@@ -16,6 +16,7 @@ import logging
 from ..core import auth
 from ..core.config import settings
 from ..core.hooks import HookBus
+from ..core.logsetup import setup_logging
 from ..core.runtime import runtime
 from ..services.chat import ChatPipeline
 from ..services.compress import ContextCompressor
@@ -29,10 +30,8 @@ from ..services.skills import SkillsManager
 from ..services.tool_registry import ToolRegistry
 from ..services.vision import VisionRouter
 
-logging.basicConfig(
-    level=getattr(logging, runtime.log_level, logging.INFO),
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
+# 日志先行于各单例创建，确保初始化阶段也能按配置输出（文本 / JSON）
+setup_logging(level=runtime.log_level, json_output=runtime.log_json)
 
 logger = logging.getLogger("aiassistant.gateway")
 
@@ -88,5 +87,5 @@ def readiness() -> dict:
         "auth_enabled": auth.auth_enabled(),
         "sandbox_mode": settings.sandbox_mode(),
         "plugins": sorted(plugins),
-        "version": "1.1.0",
+        "version": "1.2.0",
     }

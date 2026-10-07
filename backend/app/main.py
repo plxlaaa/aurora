@@ -42,7 +42,7 @@ async def lifespan(_app: FastAPI):
 def _create_app() -> FastAPI:
     app = FastAPI(
         title="AI Assistant Gateway",
-        version="1.1.0",
+        version="1.2.0",
         description=(
             "单机 AI 智能助手网关：多轮对话、视觉理解、上下文压缩、"
             "Skills / MCP / 自定义工具、会话管理与流式输出。"
@@ -64,7 +64,11 @@ def _create_app() -> FastAPI:
         expose_headers=["X-Request-ID"],
         max_age=600,
     )
-    mw.install(app, max_body_bytes=runtime.max_body_bytes)
+    mw.install(
+        app,
+        max_body_bytes=runtime.max_body_bytes,
+        slow_request_ms=runtime.slow_request_ms,
+    )
 
     # ---- 统一异常处理 ----
     @app.exception_handler(AppError)

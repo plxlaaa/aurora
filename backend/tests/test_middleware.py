@@ -158,6 +158,26 @@ class TestGZipHelpers(unittest.TestCase):
         raw = b"hello aurora" * 100
         self.assertEqual(gzip.decompress(gzip.compress(raw)), raw)
 
+    def test_respects_custom_min_size(self):
+        """实例min_size 必须生效（回归：曾硬编码全局阈值导致参数失效）。"""
+        headers = [(b"content-type", b"application/json"), (b"content-length", b"2000")]
+        # 默认阈值 1024 下 2000 字节应压缩
+        self.assertTrue(mw.GZipMiddleware._should_compress(headers, 1024))
+        # 提高阈值到 4096 后同样大小的响应不再压缩
+        self.assertFalse(mw.GZipMiddleware._should_compress(headers, 4096))
+        # 降到 512 后仍压缩
+        self.assertTrue(mw.GZipMiddleware._should_compress(headers, 512))
+
+    def test_custom_min_size_still_skips_stream_types(self):
+        """自定义阈值不应绕过「不压缩类型」白名单。"""
+        headers = [(b"content-type", b"text/event-stream"), (b"content-length", b"99999")]
+        self.assertFalse(mw.GZipMiddleware._should_compress(headers, 1))
+
+    def test_unknown_length_still_compresses(self):
+        """分块/流式响应无 Content-Length，任意阈值下都应压缩。"""
+        headers = [(b"content-type", b"application/json")]
+        self.assertTrue(mw.GZipMiddleware._should_compress(headers, 999999))
+
 
 class TestErrorBody(unittest.TestCase):
     def test_error_body_shape(self):

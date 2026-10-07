@@ -2,6 +2,49 @@
 
 本文件记录 Aurora AI 智能助手的版本变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.2.0] — 2026-10-07
+
+修复「死配置」与gzip 阈值缺陷，新增结构化日志与离线分发能力，Linux / Windows 安装部署再增强。
+
+### 缺陷修复
+
+- **`AI_ASSISTANT_SLOW_REQUEST_MS` 此前为死配置**：`middleware.install()` 未把 `runtime.slow_request_ms` 下发给 `RequestContextMiddleware`，无论环境变量如何设置，慢请求阈值恒为硬编码的 30s。现已在 `main.py` 接线，配置真正生效。
+- **gzip 阈值参数失效**：`GZipMiddleware._should_compress()` 为`staticmethod` 且内部直接引用模块级 `GZIP_MIN_SIZE`，导致构造参数 `min_size` 完全无效。现改为接收 `min_size` 并由实例传入，实例化阈值可正确控制压缩判定。
+- **会话导出 O(n) 扫描**：`GET /api/sessions/{id}/export` 原先调用 `list_sessions()` 遍历并解析**全部**会话文件才能取到单个会话的标题，会话量大时开销随总数线性增长。新增 `SessionStore.get_meta()` 定点查询（只读目标文件），并在导出前显式校验会话存在性。
+- **退化会话 id 命中共享文件**：`_path()` 过滤非法字符后可能得到空串，进而落到共享的 `.jsonl` 文件（传入 `..` / `///` 即可命中），存在跨会话误读风险。新增 `_safe_name()` 并在 `exists()` / `load()` / `_load_unlocked()` / `get_meta()` 中拒绝空结果。
+- **导出格式参数未校验**：`format` 原先任意取值都会被静默当作 `md` 处理，现非法值返回 400 `validation_error`。
+
+### 后端增强
+
+- **结构化 JSON 日志**（新增 `app/core/logsetup.py`）：`AI_ASSISTANT_LOG_JSON=true` 时每行输出一条 JSON（`ts` / `level` / `logger` / `msg`），业务自定义字段通过 `extra=` 透传，异常自动带 `exc`。`setup_logging()` 幂等，重复调用不叠加handler，并接管 uvicorn 的重复输出。
+- **request_id 全链路透传**：新增 `request_id_var` 上下文变量，由 `RequestContextMiddleware` 绑定/复位，使同一请求内的访问日志与业务日志自动携带同一 trace id，无需逐处传参。
+- **`SessionStore.get_meta()`**：单会话元信息定点查询（含标题、消息数、状态、时间戳），对外不泄漏内部排序键 `mtime`。
+- **打包脚本安全性**：新增的 tarball / zip 打包流程均显式排除 `config/*.local.yaml`，确保真实 api_key 不会进入分发包。
+
+### 测试
+
+- 新增 `tests/test_logging.py`（12 项）：JSON 字段完整性、request_id 注入与缺席、extra 字段、Unicode、异常堆栈、文本模式、幂等初始化、非法级别回退，以及 `slow_request_ms` 接线断言。
+- 新增 `tests/test_sessions_meta.py`（12 项 + 12 subtests）：`get_meta` 正确性、只读目标文件（以 spy 断言不扫描其它会话）、自定义标题优先，以及退化 id 的各类拒绝行为（含「不得读到 `.jsonl`」回归用例）。
+- 新增 `tests/test_sessions_export.py`（7 项）：md / json 导出、默认格式、自定义标题、非法 format 返回 400、缺失会话 404、中文标题 RFC 5987 编码。
+- 扩充 `tests/test_middleware.py`：新增 3 项 gzip 自定义阈值用例。
+- 测试总数 **220 → 254 项**，全部通过。
+
+### 部署与安装
+
+- **Linux 离线分发**（新增 `scripts/package-tarball.sh` + `scripts/install-tarball.sh`）：在有网机器打包 `dist/aurora-<版本>-linux-<arch>.tar.gz` 与 `.sha256`，目标机解压即装，**无需 git / npm / 网络**。支持 `--with-venv`（预建虚拟环境）、`--with-frontend`（自动构建）、`--version`、`--outdir`；安装脚本支持 `--skip-venv` / `--no-systemd` / `--uninstall` / `--purge`。
+- **Windows 离线分发**（新增 `scripts/package-windows.ps1`）：产出 `dist\aurora-<版本>-windows-<arch>.zip` 与 SHA256，参数含 `-Version` / `-Arch` / `-OutDir` / `-WithFrontend`；zip 内已随包分发 `install.ps1`。
+- **WSL2 部署**（新增 `deploy/wsl2/`）：`install-wsl2-linux.sh` 自动识别 WSL 环境并把 `AI_ASSISTANT_HOST` 设为 `0.0.0.0`（否则 Windows 宿主机无法通过 localhost 访问），支持 `--install-dir` / `--port` / `--skip-frontend` / `--uninstall` / `--purge`；`install-wsl2.ps1` 为 Windows 侧包装器，负责发行版检测与参数转调。
+- **Linux 安装脚本增强**（`deploy/install.sh`）：新增 `--with-firewall`（自动识别 ufw / firewalld 并放行端口）、`--check-upgrade`（仅比对本地与远端 commit，不改动文件）、`--start`（安装后启动并做健康检查）；卸载时同步清理防火墙放行规则。
+- **包管理器分发清单**：新增 `deploy/windows/winget/plxlaaa.aurora.yaml` 与 `deploy/windows/scoop/plxlaaa-aurora.json`，支持 `winget install` / `scoop install`。
+- **.gitignore**：新增 `dist/`，避免打包产物误入版本库。
+
+### 文档
+
+- `README.md`：功能表新增「可观测性」与「离线包」条目；快速开始新增方式四（离线包）、方式五（WSL2）；目录结构补充打包脚本与 `deploy/wsl2`、winget/scoop；新增「可观测性」小节与 JSON 日志示例；环境变量表补充 `AI_ASSISTANT_LOG_JSON` / `_SLOW_REQUEST_MS` / `_TRUST_PROXY` / `_LOG_LEVEL`；测试数220 → 254。
+- `INSTALL.md`：新增「二之二 Linux 离线部署（tarball 内网分发）」「三之二 Windows 离线部署（zip 分发）」两章；systemd 章节补充防火墙与升级辅助；WSL2 章节补充一键脚本两种入口；配置章节补充 JSON 日志与慢请求阈值说明并标注「v1.2.0 起真正生效」；快速决策表补充离线场景。
+- `deploy/.env.example` / `deploy/gateway.env.example`：新增 `AI_ASSISTANT_LOG_JSON`。
+- 版本号统一提升至 **1.2.0**（`app/main.py`、`routers/deps.py`、winget / scoop 清单同步）。
+
 ## [1.1.0] — 2026-10-07
 
 后端健壮性与可观测性增强，补齐 Linux / Windows 双端安装部署能力。

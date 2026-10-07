@@ -1,0 +1,28 @@
+{
+    "version": "1.2.0",
+    "description": "Aurora AI 智能助手——单机部署的浏览器 Web UI 智能助手（FastAPI + Vue3）",
+    "homepage": "https://github.com/plxlaaa/aurora",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/plxlaaa/aurora.git"
+    },
+    "notes": [
+        "Aurora AI 智能助手：多轮对话、视觉理解、上下文压缩、Skills / MCP / 自定义工具。",
+        "安装后在 %ProgramData%\\Aurora 生成配置与会话数据，卸载时默认保留。",
+        "如需注册开机自启服务，安装后执行：",
+        "  powershell -ExecutionPolicy Bypass -File %ProgramData%\\Aurora\\..\\..\\install.ps1 -RegisterService",
+        "更推荐直接克隆仓库执行：",
+        "  powershell -ExecutionPolicy Bypass -File deploy\\windows\\install.ps1 -RegisterService"
+    ],
+    "bin": [
+        "aurora"
+    ],
+    "checkver": {
+        "url": "https://api.github.com/repos/plxlaaa/aurora/releases/latest",
+        "regex": "\"tag_name\":\\s*\"v(?<version>[\\d.]+)\""
+    },
+    "autoupdate": {
+        "url": "https://api.github.com/repos/plxlaaa/aurora/releases/latest"
+    }
+}

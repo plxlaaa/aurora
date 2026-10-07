@@ -18,7 +18,8 @@
 | 会话管理 | 持久化、重命名、归档、导出（Markdown / JSON） |
 | 用量统计 | 内置 stats 插件 + 生命周期钩子扩展点 |
 | 统一鉴权 | JWT / API Key，登录失败按 IP 限流 |
-| 部署友好 | systemd / Docker / Windows 服务 / WSL2 一键安装 |
+| 可观测性 | 结构化 JSON 日志（自动注入 request_id）、慢请求告警、健康/就绪探针 |
+| 部署友好 | systemd / Docker / Windows 服务 / WSL2 / 离线包一键安装 |
 
 ## 快速开始
 
@@ -49,6 +50,30 @@ sudo systemctl restart aiassistant-gateway
 powershell -ExecutionPolicy Bypass -File deploy\windows\install.ps1 -RegisterService
 ```
 
+### 方式四：离线包（内网 / 无外网）
+
+在一台有网机器上打包，拷贝到目标机离线安装（目标机**无需 git / npm / 网络**）：
+
+```bash
+# Linux：产出 dist/aurora-<版本>-linux-<arch>.tar.gz
+cd frontend && npm ci && npm run build && cd ..
+bash scripts/package-tarball.sh
+sudo tar -xzf aurora-1.1.0-linux-amd64.tar.gz -C /opt
+sudo bash /opt/aurora-1.1.0/install-tarball.sh
+```
+
+```powershell
+# Windows：产出 dist\aurora-<版本>-windows-x64.zip
+powershell -ExecutionPolicy Bypass -File scripts\package-windows.ps1
+```
+
+### 方式五：Windows WSL2
+
+```powershell
+# 在 WSL 内执行（自动配置 0.0.0.0 监听，便于 Windows 侧 localhost 访问）
+wsl -d Ubuntu-22.04 -- bash -lc "cd ~/aurora && sudo bash deploy/wsl2/install-wsl2-linux.sh"
+```
+
 > 完整部署手册（含反向代理、HTTPS、WSL2、升级卸载与排错）见 **[INSTALL.md](INSTALL.md)**。
 
 ## 目录结构
@@ -63,7 +88,10 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\install.ps1 -RegisterSer
 │   ├── AI助手部署与实现规范书.md    # 部署与实现规范
 │   └── API.md                     # 接口参考（REST / WebSocket）
 ├── scripts/
-│   └── env-setup.sh               # 环境自动检测与安装（幂等，支持 --dry-run）
+│   ├── env-setup.sh               # 环境自动检测与安装（幂等，支持 --dry-run）
+│   ├── package-tarball.sh         # 构建 Linux 离线安装包（tar.gz + SHA256）
+│   ├── install-tarball.sh         # 离线包内的一键安装脚本（随包分发）
+│   └── package-windows.ps1        # 构建 Windows 离线安装包（zip + SHA256）
 ├── config/                        # 运行时配置（可热刷新）
 │   ├── models.yaml                # 主/视觉/压缩端点 + 视觉路由策略 + 压缩参数
 │   ├── sandbox.yaml               # sandbox/local 执行环境
@@ -77,6 +105,7 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\install.ps1 -RegisterSer
 │   │   │   ├── runtime.py         #   环境变量运行参数
 │   │   │   ├── errors.py          #   统一异常与错误码
 │   │   │   ├── middleware.py      #   请求 ID / 安全头 / 限额 / gzip
+│   │   │   ├── logsetup.py        #   日志初始化（文本 / JSON 双格式）
 │   │   │   ├── auth.py            #   JWT/API Key 鉴权
 │   │   │   └── hooks.py           #   生命周期事件总线
 │   │   ├── services/              # 业务服务层
@@ -94,14 +123,17 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\install.ps1 -RegisterSer
 │   │   └── routers/               # API 路由层
 │   │       ├── deps.py            #   共享单例装配 + 启停逻辑
 │   │       └── api.py             #   REST + WebSocket 端点
-│   ├── tests/                     # 单元与集成测试（unittest，220 项）
+│   ├── tests/                     # 单元与集成测试（unittest，254 项）
 │   └── requirements.txt
 ├── frontend/                      # Vue 3 单页应用（Vite）
 │   ├── package.json / vite.config.js / index.html
 │   └── src/{main.js, App.vue, api/, router/, views/, components/}
 └── deploy/
-    ├── install.sh                 # Linux 安装 / 升级 / 卸载
+    ├── install.sh                 # Linux 安装 / 升级 / 卸载（含防火墙、版本检查）
     ├── windows/install.ps1        # Windows 一键安装（NSSM 服务）
+    ├── windows/winget/            # winget 分发清单
+    ├── windows/scoop/             # scoop 分发清单
+    ├── wsl2/                      # WSL2 部署（PowerShell 包装器 + Linux 侧脚本）
     ├── docker/Dockerfile          # 多阶段构建
     ├── docker-compose.yml         # 容器编排
     ├── .env.example               # 跨平台环境变量模板
@@ -139,7 +171,7 @@ npm run dev
 测试：
 
 ```bash
-cd backend && venv/bin/python -m unittest discover -s tests -v   # 220 项
+cd backend && venv/bin/python -m unittest discover -s tests -v   # 254 项
 ```
 
 ## 配置说明
@@ -192,8 +224,25 @@ token 数超过 `threshold * context_window` 时自动触发，也可在设置�
 | `AI_ASSISTANT_MAX_CONCURRENT_GENERATIONS` | `3` | 全局并发生成上限 |
 | `AI_ASSISTANT_MAX_BODY_MB` | `24` | 单请求体上限 |
 | `AI_ASSISTANT_CORS_ORIGINS` | `http://localhost:5173` | 跨域白名单（逗号分隔） |
+| `AI_ASSISTANT_LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `AI_ASSISTANT_LOG_JSON` | `false` | `true` 输出 JSON 结构化日志（自动注入 `request_id`） |
+| `AI_ASSISTANT_SLOW_REQUEST_MS` | `30000` | 慢请求告警阈值（毫秒） |
+| `AI_ASSISTANT_TRUST_PROXY` | `true` | 是否采信 `X-Forwarded-For`（反代在前时保持 true） |
 
 完整清单见 [`deploy/.env.example`](deploy/.env.example)。
+
+### 可观测性
+
+```bash
+# 结构化日志（每行一条 JSON，含 ts/level/logger/msg/request_id）
+export AI_ASSISTANT_LOG_JSON=true
+
+# 只看慢请求与告警
+sudo journalctl -u aiassistant-gateway --since today -p warning
+```
+
+`request_id` 由中间件统一分配（透传上游 `X-Request-ID`），并通过上下文自动附加到该请求内的
+所有业务日志，访问日志与业务日志可按同一 trace id 串联排查。
 
 ## API 摘要
 

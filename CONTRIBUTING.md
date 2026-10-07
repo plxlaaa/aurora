@@ -55,7 +55,7 @@ cd frontend && npm run dev
 ### 代码检查与测试
 
 ```bash
-# 后端测试（220 项）
+# 后端测试（254 项）
 cd backend && venv/bin/python -m unittest discover -s tests -v
 
 # 前端构建验证

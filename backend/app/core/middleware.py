@@ -17,11 +17,16 @@ import json
 import logging
 import time
 import uuid
+from contextvars import ContextVar
 from typing import Any, Callable, Iterable
 
 logger = logging.getLogger("aiassistant.http")
 
 REQUEST_ID_HEADER = "x-request-id"
+
+# 当前请求的 trace id：由 RequestContextMiddleware 绑定，供 JSON 日志格式化器
+# 自动附加到每条日志，无需逐处传递参数。
+request_id_var: ContextVar[str] = ContextVar("request_id", default="")
 
 # 低于该字节数的响应不压缩（压缩收益抵不过 CPU 开销）
 GZIP_MIN_SIZE = 1024
@@ -75,9 +80,12 @@ class RequestContextMiddleware:
                 raw.append((REQUEST_ID_HEADER.encode("latin-1"), request_id.encode("latin-1")))
             await send(message)
 
+        # 将 request_id 绑定到上下文，使下游业务日志自动携带同一 trace id
+        token = request_id_var.set(request_id)
         try:
             await self.app(scope, receive, send_wrapper)
         finally:
+            # 注意：先记录访问日志再reset 上下文，否则本条日志会丢失 request_id 字段
             elapsed_ms = (time.perf_counter() - started) * 1000
             status = status_holder.get("status", 0)
             # 健康检查属高频噪声，降级为 debug
@@ -91,6 +99,7 @@ class RequestContextMiddleware:
                 logger.warning(
                     "慢请求 %.0fms %s %s rid=%s", elapsed_ms, scope.get("method"), scope.get("path"), request_id
                 )
+            request_id_var.reset(token)
 
 
 class SecurityHeadersMiddleware:
@@ -192,7 +201,7 @@ class GZipMiddleware:
         self.min_size = min_size
 
     @staticmethod
-    def _should_compress(headers: list[tuple[bytes, bytes]]) -> bool:
+    def _should_compress(headers: list[tuple[bytes, bytes]], min_size: int = GZIP_MIN_SIZE) -> bool:
         length = 0
         content_type = ""
         already = False
@@ -212,7 +221,7 @@ class GZipMiddleware:
         if any(content_type.startswith(skip) for skip in GZIP_SKIP_CONTENT_TYPES):
             return False
         # 无 Content-Length（分块/流式）也压缩，收益通常更大
-        return length == 0 or length >= GZIP_MIN_SIZE
+        return length == 0 or length >= min_size
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] != "http":
@@ -230,7 +239,7 @@ class GZipMiddleware:
         async def send_wrapper(message: dict[str, Any]) -> None:
             if message["type"] == "http.response.start":
                 message = {**message, "headers": list(message.get("headers", []))}
-                if message["status"] < 400 and self._should_compress(message["headers"]):
+                if message["status"] < 400 and self._should_compress(message["headers"], self.min_size):
                     raw: list[tuple[bytes, bytes]] = [
                         (k, v) for k, v in message["headers"]
                         if k.decode("latin-1").lower() not in ("content-length", "content-encoding")
@@ -262,13 +271,13 @@ class GZipMiddleware:
         await self.app(scope, receive, send_wrapper)
 
 
-def install(app: Any, *, max_body_bytes: int) -> None:
+def install(app: Any, *, max_body_bytes: int, slow_request_ms: int = 30_000) -> None:
     """按执行顺序注册全部中间件（后注册者更外层）。"""
     # 注册顺序决定包裹层次：GZip 最外层最先看到响应头
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=max_body_bytes)
     app.add_middleware(GZipMiddleware, min_size=GZIP_MIN_SIZE)
-    app.add_middleware(RequestContextMiddleware)
+    app.add_middleware(RequestContextMiddleware, slow_request_ms=slow_request_ms)
 
 
 def slow_request_threshold(default: int) -> int:

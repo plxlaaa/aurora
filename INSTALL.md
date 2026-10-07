@@ -3,8 +3,8 @@
 Aurora AI 智能助手网关的单机部署手册，覆盖 **Linux**（systemd / Docker）与 **Windows**（PowerShell / NSSM / WSL2）两端。
 
 - 部署方式选择：[快速决策](#快速决策)
-- Linux 部署：[Docker](#一linux-部署) · [systemd](#二linux-部署systemd)
-- Windows 部署：[一键脚本](#三windows-部署powershell-一键脚本) · [手动](#四windows-手动部署) · [WSL2](#五windows-部署wsl2)
+- Linux 部署：[Docker](#一linux-部署) · [systemd](#二linux-部署systemd) · [离线 tarball](#二二linux-离线部署tarball-内网分发)
+- Windows 部署：[一键脚本](#三windows-部署powershell-一键脚本) · [离线 zip](#三二windows-离线部署zip-分发) · [手动](#四windows-手动部署) · [WSL2](#五windows-部署wsl2)
 - 通用：[反代与 HTTPS](#六反向代理与-https) · [配置](#七配置说明) · [升级卸载](#八升级与卸载) · [排错](#九常见问题排查)
 
 ---
@@ -15,7 +15,9 @@ Aurora AI 智能助手网关的单机部署手册，覆盖 **Linux**（systemd /
 |------|----------|------|
 | Linux 单机，长期运行 | [systemd](#二linux-部署systemd) | 5-10 分钟 |
 | Linux 快速试用 / 容器化 | [Docker](#一linux-部署) | 3 分钟 |
+| Linux 内网机房 / 无外网 | [离线 tarball](#二二linux-离线部署tarball-内网分发) | 3 分钟 |
 | Windows 单机，长期运行 | [PowerShell 一键脚本](#三windows-部署powershell-一键脚本) | 5 分钟 |
+| Windows 内网 / 批量分发 | [离线 zip](#三二windows-离线部署zip-分发) | 3 分钟 |
 | Windows 开发者 / 熟悉 Linux | [WSL2](#五windows-部署wsl2) | 5 分钟 |
 | 需要 HTTPS 与域名 | 任一 + [反代](#六反向代理与-https) | +10 分钟 |
 
@@ -177,6 +179,90 @@ sudo ss -tlnp | grep 8080
 
 unit 文件已启用 systemd 沙箱加固（`ProtectSystem=strict`、`NoNewPrivileges`、内存写入禁用等），可写路径通过 `ReadWritePaths` 白名单限定。
 
+### 7. 防火墙与升级辅助
+
+```bash
+# 安装时自动放行端口（仅在确需外部直连时使用）
+sudo bash deploy/install.sh --with-firewall
+
+# 仅检查是否有新版本，不改动任何文件
+sudo bash deploy/install.sh --check-upgrade
+
+# 安装并立即启动（脚本末尾自动做健康检查）
+sudo bash deploy/install.sh --start
+```
+
+> `--with-firewall` 会同时识别 **ufw**（Debian/Ubuntu）与 **firewalld**（RHEL/CentOS/Fedora）；
+> 卸载时（`--uninstall` / `--purge`）会自动清理对应的放行规则。
+
+---
+
+## 二之二、Linux 离线部署（tarball 内网分发）
+
+适用于**无外网 / 内网机房 / 灰度分发**场景：在一台有网机器上打包，把tarball 拷到目标机后离线安装，目标机**不需要 git / npm / 网络**。
+
+### 1. 在有网机器上打包
+
+```bash
+git clone https://github.com/plxlaaa/aurora.git && cd aurora
+cd frontend && npm ci && npm run build && cd ..     # 先构建前端产物
+
+# 打包（不含 venv，目标机自动创建）
+bash scripts/package-tarball.sh
+
+# 或：预建 venv + 自动构建前端（目标机免编译，适合批量部署）
+bash scripts/package-tarball.sh --with-venv --with-frontend --version 1.1.0
+```
+
+产物位于 `dist/`：
+
+```
+dist/aurora-1.1.0-linux-amd64.tar.gz
+dist/aurora-1.1.0-linux-amd64.tar.gz.sha256
+```
+
+包内已包含后端源码、前端 `dist`、配置模板、systemd unit、nginx 模板与一键安装脚本。
+
+### 2. 拷贝到目标机并校验
+
+```bash
+scp dist/aurora-1.1.0-linux-amd64.tar.gz*  user@server:/tmp/
+cd /tmp && sha256sum -c aurora-1.1.0-linux-amd64.tar.gz.sha256
+# 必须显示 OK 再继续
+```
+
+### 3. 解压并安装
+
+```bash
+sudo tar -xzf aurora-1.1.0-linux-amd64.tar.gz -C /opt
+sudo bash /opt/aurora-1.1.0/install-tarball.sh
+```
+
+安装脚本支持：
+
+| 参数 | 说明 |
+|------|------|
+| `--skip-venv` | 跳过虚拟环境创建（包内已内置时使用） |
+| `--no-systemd` | 不注册 systemd 服务（容器/无 systemctl 环境） |
+| `--uninstall` | 卸载（保留数据目录） |
+| `--purge` | 卸载并删除数据目录与密钥文件 |
+
+```bash
+# 常用组合
+sudo bash /opt/aurora-1.1.0/install-tarball.sh --no-systemd   # 纯容器环境
+sudo bash /opt/aurora-1.1.0/install-tarball.sh --purge        # 彻底卸载
+```
+
+### 4. 安装后配置密钥并启动
+
+```bash
+sudo vi /etc/aiassistant/gateway.env     # 填 AI_ASSISTANT_API_KEY
+sudo systemctl restart aiassistant-gateway
+curl http://127.0.0.1:8080/api/health
+```
+
+> **安全提示**：打包脚本会自动排除 `config/*.local.yaml`，确保真实 api_key 不会被打进分发包。
+
 ---
 
 ## 三、Windows 部署（PowerShell 一键脚本）
@@ -245,6 +331,64 @@ Get-Content "C:\ProgramData\Aurora\logs\service.log" -Tail 100   # 查看日志
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8080/api/health
 ```
+
+---
+
+## 三之二、Windows 离线部署（zip 分发）
+
+与 Linux tarball 对应：在有网机器上打包 zip，拷贝到内网机器离线安装，**目标机无需 git / npm**。
+
+### 1. 在有网机器上打包
+
+```powershell
+cd aurora\frontend
+npm ci; npm run build
+cd ..
+
+# 打包（复用已有 frontend\dist）
+powershell -ExecutionPolicy Bypass -File scripts\package-windows.ps1
+
+# 自动构建前端 + 指定版本与架构
+powershell -ExecutionPolicy Bypass -File scripts\package-windows.ps1 -Version 1.1.0 -Arch x64 -WithFrontend
+```
+
+产物：
+
+```
+dist\aurora-1.1.0-windows-x64.zip
+dist\aurora-1.1.0-windows-x64.zip.sha256
+```
+
+### 2. 目标机离线安装
+
+```powershell
+# 校验（PowerShell）
+(Get-FileHash .\aurora-1.1.0-windows-x64.zip -Algorithm SHA256).Hash
+
+# 解压后以管理员身份安装
+Expand-Archive .\aurora-1.1.0-windows-x64.zip -DestinationPath C:\Temp\aurora
+powershell -ExecutionPolicy Bypass -File C:\Temp\aurora\aurora-1.1.0-windows-x64\install.ps1 -RegisterService
+```
+
+### 3. winget / scoop 分发
+
+仓库已内置分发清单，可直接提交到对应仓库或自建源：
+
+| 包管理器 | 清单位置 | 包标识 |
+|---------|---------|--------|
+| winget | `deploy/windows/winget/plxlaaa.aurora.yaml` | `plxlaaa.aurora` |
+| scoop | `deploy/windows/scoop/plxlaaa-aurora.json` | `aurora` |
+
+```powershell
+# scoop（自建bucket 后）
+scoop bucket add aurora https://github.com/plxlaaa/aurora
+scoop install aurora
+
+# winget（发布到 Releases 后）
+winget install plxlaaa.aurora
+```
+
+> 清单中的 `DownloadUrl` 需指向 GitHub Release 资产；使用前请把版本号与下载地址替换为实际发布值。
 
 ---
 
@@ -325,6 +469,36 @@ wsl --set-default-version 2
 
 ### 2. 在 WSL 内按Linux 方式部署
 
+**方式 A：一键脚本（推荐）**
+
+仓库提供 WSL 专用安装脚本，会自动配置 `0.0.0.0` 监听以便 Windows 宿主机访问。入口有两个，按你的调用位置选择：
+
+```powershell
+# 入口 1：在 Windows PowerShell 中执行（自动检查发行版并转调 WSL）
+#         需先把仓库克隆/解压到 Windows 可访问的路径
+wsl -d Ubuntu-22.04 -- bash -lc "cd /mnt/c/path/to/aurora && sudo bash deploy/wsl2/install-wsl2-linux.sh"
+```
+
+```bash
+# 入口 2：直接进入 WSL 终端执行（路径为 WSL 内的真实路径）
+cd ~/aurora
+sudo bash deploy/wsl2/install-wsl2-linux.sh
+
+# 跳过前端构建 / 自定义端口
+sudo bash deploy/wsl2/install-wsl2-linux.sh --skip-frontend --port 9090
+
+# 卸载（--purge 一并删除数据）
+sudo bash deploy/wsl2/install-wsl2-linux.sh --uninstall
+```
+
+> Windows 侧还提供了 PowerShell 包装器 `deploy/wsl2/install-wsl2.ps1`，它会自动检测发行版、
+> 校验 WSL 是否可用并拼接参数，适合从 Windows 直接调用：
+> ```powershell
+> powershell -ExecutionPolicy Bypass -File deploy\wsl2\install-wsl2.ps1 -Distro Ubuntu-22.04
+> ```
+
+**方式 B：完全按 Linux 方式**
+
 ```bash
 # WSL 内执行（等同 Linux systemd 部署）
 sudo apt update && sudo apt install -y python3-venv python3-pip nodejs npm git
@@ -333,6 +507,8 @@ sudo bash deploy/install.sh
 sudo systemctl restart aiassistant-gateway
 curl http://127.0.0.1:8080/api/health
 ```
+
+> WSL 脚本相比通用 `install.sh` 的差异：不强制创建 `aiassistant` 系统用户，并把 `AI_ASSISTANT_HOST` 设为 `0.0.0.0`，否则 Windows 侧无法通过 localhost 访问。
 
 ### 3. 从 Windows 访问
 
@@ -440,6 +616,17 @@ sudo certbot --nginx -d ai.example.com
 | `AI_ASSISTANT_MAX_BODY_MB` | `24` | 单请求体上限（MB） |
 | `AI_ASSISTANT_TRUST_PROXY` | `true` | 是否采信 `X-Forwarded-For`（反代在前时保持 true） |
 | `AI_ASSISTANT_LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `AI_ASSISTANT_LOG_JSON` | `false` | `true` 时输出 JSON 结构化日志（含自动注入的 `request_id`），便于 Loki / ES 采集 |
+| `AI_ASSISTANT_SLOW_REQUEST_MS` | `30000` | 慢请求告警阈值（毫秒），超过即打 WARNING |
+
+> `AI_ASSISTANT_SLOW_REQUEST_MS` 与 `AI_ASSISTANT_LOG_JSON` 从 **v1.2.0** 起真正生效
+> （此前已定义但未下发到中间件 / 未实现），升级后可通过日志确认配置已应用。
+
+开启 JSON 日志后的输出示例：
+
+```json
+{"ts":"2026-10-07T02:04:17.725813+00:00","level":"INFO","logger":"aiassistant.http","msg":"GET /api/health -> 200 3ms rid=9c54d883e27c4a5c ip=testclient","request_id":"9c54d883e27c4a5c"}
+```
 
 完整清单见 [`deploy/.env.example`](deploy/.env.example)；systemd 专用模板见 [`deploy/gateway.env.example`](deploy/gateway.env.example)。
 
