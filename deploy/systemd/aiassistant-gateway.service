@@ -1,19 +1,27 @@
 # =============================================================================
 # aiassistant-gateway.service —— AI 智能助手网关 (FastAPI) 服务
 #
-# 说明：
-#   - 以 aiassistant 用户运行，禁止 root 以免泄露权限
-#   - 网关只监听 127.0.0.1:8080，所有外部流量统一由 nginx 反向代理进入
-#   - 通过 Environment 注入网关运行所需的路径配置，应用代码从环境变量读取
-#     （对应 backend/app/config.py 中的读法）
-#   - ExecStart 使用 backend 目录下的虚拟环境 uvicorn 启动应用主入口 app.main:app
-#   - 若网关崩溃/被杀，systemd 会在 5 秒后自动拉起（Restart=on-failure）
+# 安装：
+#   sudo cp deploy/systemd/aiassistant-gateway.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now aiassistant-gateway
+#
+# 密钥与覆盖配置统一放在 /etc/aiassistant/gateway.env（权限 600，不入版本库）：
+#   sudo install -m 600 deploy/gateway.env.example /etc/aiassistant/gateway.env
+#   sudo vi /etc/aiassistant/gateway.env    # 填入 API_KEY / JWT_SECRET
+#   sudo systemctl restart aiassistant-gateway
+#
+# 安全说明：
+#   - 以非特权用户 aiassistant 运行；
+#   - 只监听 127.0.0.1:8080，外部流量由 nginx 反代进入；
+#   - 启用 systemd 沙箱加固（ProtectSystem=strict + ReadWritePaths 白名单）。
 # =============================================================================
 [Unit]
 Description=AI Assistant Gateway (FastAPI, single node 单机网关)
-# 依赖网络就绪后再启动
-After=network.target
-# 强烈建议等 vLLM 推理服务先起来；若网关启动时后端未就绪也能重试，故设弱依赖
+Documentation=https://github.com/plxlaaa/aurora
+After=network-online.target
+Wants=network-online.target
+# 建议等模型推理服务先起来；未就绪时网关会自动重试，故为弱依赖
 Wants=vllm-main.service
 
 [Service]
@@ -24,23 +32,67 @@ Group=aiassistant
 WorkingDirectory=/opt/aiassistant/backend
 
 Environment=PATH=/opt/aiassistant/backend/venv/bin
-# ---- 网关运行路径配置（随项目结构，如需调整请同步修改 install.sh）----
+# ---- 网关运行路径配置（与 deploy/install.sh 的安装位置保持一致）----
 Environment=AI_ASSISTANT_CONFIG_DIR=/opt/aiassistant/config
 Environment=AI_ASSISTANT_DATA_DIR=/opt/aiassistant/data/sessions
 Environment=AI_ASSISTANT_SKILLS_DIR=/opt/aiassistant/config/skills
 Environment=AI_ASSISTANT_UPLOAD_DIR=/opt/aiassistant/data/uploads
-# 若前后端同机且走 nginx，可在此显式声明前端静态目录（可选）
-# Environment=AI_ASSISTANT_FRONTEND_DIR=/opt/aiassistant/frontend/dist
+# 网关直接托管前端构建产物，免去单独配置 nginx 静态站点
+Environment=AI_ASSISTANT_FRONTEND_DIR=/opt/aiassistant/frontend/dist
+# ---- 运行时行为 ----
+Environment=AI_ASSISTANT_HOST=127.0.0.1
+Environment=AI_ASSISTANT_PORT=8080
+Environment=AI_ASSISTANT_LOG_LEVEL=INFO
+Environment=AI_ASSISTANT_TRUST_PROXY=true
+Environment=AI_ASSISTANT_MAX_CONCURRENT_GENERATIONS=3
+Environment=AI_ASSISTANT_MAX_BODY_MB=24
 
-# 启动 FastAPI 网关（uvicorn 应用入口固定为 app.main:app）
-ExecStart=/opt/aiassistant/backend/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8080
+# 密钥与覆盖项（文件不存在时因 "-" 前缀被安全跳过）
+EnvironmentFile=-/etc/aiassistant/gateway.env
+
+# uvicorn 启动参数：--proxy-headers 让网关正确识别反代后的客户端 IP（日志与登录限流依赖）
+ExecStart=/opt/aiassistant/backend/venv/bin/uvicorn app.main:app \
+    --host 127.0.0.1 --port 8080 \
+    --proxy-headers --forwarded-allow-ips 127.0.0.1 \
+    --timeout-keep-alive 65 \
+    --log-level info
 
 # 异常退出时自动重启，间隔 5 秒；正常 stop（systemctl stop）不会被拉起
 Restart=on-failure
 RestartSec=5
+# 优雅退出：给在跑的流式生成最多 30s 收尾时间
+KillSignal=SIGTERM
+TimeoutStopSec=30
 
-# 基础资源保护（可选，可按需调整）
+# ---- 资源与可靠性 ----
+LimitNOFILE=65535
+# 内存上限（按机器规格调整，默认不限制）
+# MemoryMax=4G
+
+# ---- 日志：统一交给 journald，journalctl -u aiassistant-gateway 查看/跟踪 ----
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aiassistant-gateway
+
+# ---- 安全加固 ----
 NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# ProtectSystem=strict 下必须显式声明可写路径
+ReadWritePaths=/opt/aiassistant/data /opt/aiassistant/logs /opt/aiassistant/config
 
 [Install]
 WantedBy=multi-user.target

@@ -40,6 +40,10 @@ class SessionStore:
         # 会话列表缓存：{session_id: session_info}，在会话变更时失效
         self._session_cache: dict[str, dict[str, Any]] = {}
         self._cache_valid = False
+        # 每个会话文件的签名 (mtime_ns, size)，用于列表缓存的增量失效判断
+        self._file_sigs: dict[str, tuple[int, int]] = {}
+        # 标题表签名：改名会影响列表展示，改名时整体重建
+        self._titles_sig: tuple = ()
 
     def _load_status(self) -> None:
         if self._status_path.exists():
@@ -283,58 +287,120 @@ class SessionStore:
             self._cache_valid = False
             return dest
 
+    # 单个会话文件的元信息签名：(mtime_ns, size)
+    _Sig = tuple[int, int]
+
+    def _scan_file(self, path: Path, session_id: str) -> dict[str, Any] | None:
+        """读取单个会话文件，生成列表条目（不含 mtime）；失败返回 None。"""
+        # 一次遍历同时提取首条user 消息标题与可见消息计数
+        preview = ""
+        count = 0
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        msg = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    role = msg.get("role")
+                    # assistant_delta 为流式碎片，不计入消息数
+                    if role != "assistant_delta":
+                        count += 1
+                    if not preview and role == "user":
+                        content = msg.get("content", "")
+                        if isinstance(content, str) and content.strip():
+                            preview = content.strip()[:50]
+            stat = path.stat()
+        except OSError:
+            return None
+        return {
+            "id": session_id,
+            "title": self._titles.get(session_id) or preview or "新会话",
+            "message_count": count,
+            "status": self.get_status(session_id),
+            "created_at": dt.datetime.fromtimestamp(stat.st_ctime, tz=dt.timezone.utc).isoformat(),
+            "updated_at": dt.datetime.fromtimestamp(stat.st_mtime, tz=dt.timezone.utc).isoformat(),
+            "mtime": stat.st_mtime,
+        }
+
     def _get_cached_session_list(self) -> list[dict[str, Any]]:
-        """使用缓存获取会话列表，如果缓失效则重新构建。"""
+        """获取会话列表缓存（按文件签名增量刷新）。
+
+        性能：每个文件以 (mtime_ns, size) 为签名，只有真正变更过的文件才重新
+        解析内容。会话数上百时，全量重建需读取每个 JSONL 全文（单次数十 MB），
+        增量方式把常态开销降到一次目录 stat。
+
+        一致性：无论缓存是否标记失效，都以「目录实际内容」为准做一次对账，
+        因此删除/归档/新建会话都能立即反映，不依赖调用方正确置失效标记。
+        """
         with self._lock:
-            if self._cache_valid and self._session_cache:
-                return list(self._session_cache.values())
-            # 重新构建缓存
-            self._session_cache = {}
-            sessions = []
+            # 与目录实际内容对账：删除/归档的会话在此被剔除
+            live: dict[str, _Sig] = {}
             for path in self.data_dir.glob("*.jsonl"):
-                # 一次遍历同时提取首条 user 消息标题与可见消息计数
-                preview = ""
-                count = 0
                 try:
-                    with open(path, encoding="utf-8") as fh:
-                        for line in fh:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                msg = json.loads(line)
-                            except json.JSONDecodeError:
-                                continue
-                            role = msg.get("role")
-                            # assistant_delta 为流式碎片，不计入消息数
-                            if role != "assistant_delta":
-                                count += 1
-                            if not preview and role == "user":
-                                content = msg.get("content", "")
-                                if isinstance(content, str) and content.strip():
-                                    preview = content.strip()[:50]
+                    st = path.stat()
                 except OSError:
                     continue
-                stat = path.stat()
-                session_id = path.stem
-                self._session_cache[session_id] = {
-                    "id": session_id,
-                    "title": self._titles.get(session_id) or preview or "新会话",
-                    "message_count": count,
-                    "status": self.get_status(session_id),
-                    "created_at": dt.datetime.fromtimestamp(stat.st_ctime, tz=dt.timezone.utc).isoformat(),
-                    "updated_at": dt.datetime.fromtimestamp(stat.st_mtime, tz=dt.timezone.utc).isoformat(),
-                    "mtime": stat.st_mtime,
-                }
+                live[path.stem] = (st.st_mtime_ns, st.st_size)
+
+            # 标题表变化会影响展示（改名是低频操作，整体重建）
+            titles_sig = tuple(sorted(self._titles.items()))
+            titles_changed = titles_sig != self._titles_sig
+            self._titles_sig = titles_sig
+
+            # 剔除已不存在的会话
+            for sid in set(self._session_cache) - set(live):
+                self._session_cache.pop(sid, None)
+                self._file_sigs.pop(sid, None)
+
+            for session_id, sig in live.items():
+                unchanged = (
+                    not titles_changed
+                    and self._file_sigs.get(session_id) == sig
+                    and session_id in self._session_cache
+                )
+                if unchanged:
+                    # 仅状态可能在内存中变化，刷新即可（无需重读文件）
+                    self._session_cache[session_id]["status"] = self.get_status(session_id)
+                    continue
+                entry = self._scan_file(self._path(session_id), session_id)
+                if entry is None:
+                    continue
+                self._session_cache[session_id] = entry
+                self._file_sigs[session_id] = sig
+
             self._cache_valid = True
             return list(self._session_cache.values())
 
     def list_sessions(self) -> list[dict[str, Any]]:
-        """返回会话列表，按最后更新时间倒序（最新在前）。"""
+        """返回会话列表，按最后更新时间倒序（最新在前）。
+
+        兼容旧调用方：等价于 `list_sessions_page(limit=None)[0]`。
+        """
+        return self.list_sessions_page()[0]
+
+    def list_sessions_page(
+        self, *, limit: int | None = None, offset: int = 0, keyword: str = ""
+    ) -> tuple[list[dict[str, Any]], int]:
+        """分页返回会话列表与过滤后的总数。
+
+        limit/offset 在排序后应用，避免全量构造；keyword 命中标题（忽略大小写）。
+        """
         with self._lock:
             sessions = self._get_cached_session_list()
+            if keyword:
+                kw = keyword.lower()
+                sessions = [s for s in sessions if kw in str(s.get("title", "")).lower()]
             sessions.sort(key=lambda s: s["mtime"], reverse=True)
+            total = len(sessions)
+            if limit is not None:
+                sessions = sessions[offset: offset + limit]
+            elif offset:
+                sessions = sessions[offset:]
             # 复制并移除 mtime，避免污染缓存
             return [
                 {k: v for k, v in s.items() if k != "mtime"} for s in sessions
-            ]
+            ], total

@@ -40,14 +40,24 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import time
 from collections import OrderedDict
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import Response
 
 from ..core import auth
+from ..core.errors import (
+    ErrorCode,
+    NotFoundError,
+    RateLimitedError,
+    SessionBusyError,
+    UnauthorizedError,
+    ValidationError,
+)
+from ..core.runtime import runtime
 from ..services.upload import UploadError, load_object_with_mime, save_upload
 
 from .deps import (
@@ -59,6 +69,7 @@ from .deps import (
     mcp_mgr,
     pipeline,
     plugins,
+    readiness,
     registry,
     sessions,
     settings,
@@ -72,6 +83,9 @@ router = APIRouter()
 # 思考强度 → 采样温度
 THINKING_TEMPERATURE = {"low": 0.3, "normal": 0.7, "high": 1.0}
 
+# 会话列表分页上限（防止一次返回过多数据拖慢前端）
+MAX_PAGE_SIZE = 200
+
 
 def require_auth(authorization: Annotated[str | None, Header()] = None) -> None:
     """除 health/login 外所有 REST 端点的统一鉴权依赖。"""
@@ -81,19 +95,19 @@ def require_auth(authorization: Annotated[str | None, Header()] = None) -> None:
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:]
     if not auth.check_bearer(token):
-        raise HTTPException(status_code=401, detail="未授权")
+        raise UnauthorizedError("未授权")
 
 
 # ---------- 全局生成并发上限 ----------
-# 信号量限制同时在跑的生成任务数，防多连接无上限并发压垮模型端点
-_MAX_CONCURRENT_GENERATIONS = 3
-_generation_slots = asyncio.Semaphore(_MAX_CONCURRENT_GENERATIONS)
+# 信号量限制同时在跑的生成任务数，防多连接无上限并发压垮模型端点。
+# 上限可通过 AI_ASSISTANT_MAX_CONCURRENT_GENERATIONS 调整。
+_generation_slots = asyncio.Semaphore(runtime.max_concurrent_generations)
 
 
 def _reject_busy_session(session_id: str) -> None:
     """写操作与生成中会话互斥：压缩/清空/删除与流式落盘并发会写坏会话文件。"""
     if sessions.get_status(session_id) == sessions.STATUS_RUNNING:
-        raise HTTPException(status_code=409, detail="会话正在生成中，请稍后再试")
+        raise SessionBusyError("会话正在生成中，请稍后再试")
 
 
 def _merge_dict(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
@@ -109,10 +123,39 @@ def _merge_dict(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def _require_dict(payload: Any, what: str = "请求体") -> dict[str, Any]:
+    """校验请求体为 JSON 对象；数组/标量等给出明确 400 而非 500。"""
+    if not isinstance(payload, dict):
+        raise ValidationError(f"{what}必须为 JSON 对象")
+    return payload
+
+
 # ---------- REST 端点 ----------
 @router.get("/api/health")
 async def health() -> dict[str, Any]:
-    return {"ok": True, "mode": settings.sandbox_mode()}
+    """存活 + 就绪探针（无需鉴权）。
+
+    - liveness：进程可响应即 ok；
+    - ready：至少一个模型端点探测成功（无端点配置时视为就绪，便于纯配置阶段）。
+    """
+    info = readiness()
+    return {
+        "ok": True,
+        "status": "healthy",
+        "ready": info["ready"],
+        "mode": settings.sandbox_mode(),
+        "version": info["version"],
+        "endpoints_available": info["endpoints_available"],
+        "endpoints_total": info["endpoints_total"],
+        "uptime_hint": "see /api/stats",
+    }
+
+
+@router.get("/api/ready")
+async def ready() -> dict[str, Any]:
+    """就绪详情（运维/监控用）：端点、MCP、插件、鉴权状态。"""
+    info = readiness()
+    return {"ok": True, **info}
 
 
 @router.get("/api/models")
@@ -166,9 +209,9 @@ async def toggle_skill(
     name: str, payload: dict[str, Any], _: Annotated[None, Depends(require_auth)]
 ) -> dict[str, Any]:
     if "enabled" not in payload:
-        raise HTTPException(status_code=400, detail="缺少 enabled 字段")
+        raise ValidationError("缺少 enabled 字段")
     if not skills_mgr.set_enabled(name, bool(payload["enabled"])):
-        raise HTTPException(status_code=404, detail=f"skill 不存在: {name}")
+        raise NotFoundError(f"skill 不存在: {name}")
     tool_registry.invalidate_tools_cache()
     return {"ok": True}
 
@@ -176,7 +219,7 @@ async def toggle_skill(
 @router.delete("/api/skills/{name}")
 async def delete_skill(name: str, _: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
     if not skills_mgr.delete(name):
-        raise HTTPException(status_code=404, detail=f"skill 不存在: {name}")
+        raise NotFoundError(f"skill 不存在: {name}")
     tool_registry.invalidate_tools_cache()
     return {"ok": True}
 
@@ -189,7 +232,7 @@ async def upload_skill(
     try:
         result = skills_mgr.import_zip(data)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise ValidationError(str(exc)) from exc
     tool_registry.invalidate_tools_cache()
     return {"ok": True, **result}
 
@@ -199,7 +242,7 @@ async def skill_files(name: str, _: Annotated[None, Depends(require_auth)]) -> d
     try:
         return {"files": skills_mgr.list_files(name)}
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise NotFoundError(str(exc)) from exc
 
 
 @router.get("/api/skills/{name}/files/{path:path}")
@@ -209,9 +252,9 @@ async def skill_read_file(
     try:
         return {"path": path, "content": skills_mgr.read_file(name, path)}
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise NotFoundError(str(exc)) from exc
     except (ValueError, FileNotFoundError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise ValidationError(str(exc)) from exc
 
 
 @router.put("/api/skills/{name}/files/{path:path}")
@@ -220,13 +263,13 @@ async def skill_write_file(
 ) -> dict[str, Any]:
     content = payload.get("content")
     if not isinstance(content, str):
-        raise HTTPException(status_code=400, detail="缺少 content 字段")
+        raise ValidationError("缺少 content 字段")
     try:
         skills_mgr.write_file(name, path, content)
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise NotFoundError(str(exc)) from exc
     except (ValueError, OSError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise ValidationError(str(exc)) from exc
     return {"ok": True}
 
 
@@ -247,15 +290,15 @@ async def get_custom_tool(
 ) -> dict[str, Any]:
     tool = custom_tools.get(name)
     if tool is None:
-        raise HTTPException(status_code=404, detail=f"工具不存在: {name}")
+        raise NotFoundError(f"工具不存在: {name}")
     return {"tool": tool}
 
 
 def _validate_custom_name(name: str) -> None:
     if name in ("read_skill", "run_skill", "run_code") or name.startswith("mcp_"):
-        raise HTTPException(status_code=400, detail=f"工具名与内置/MCP 命名空间冲突: {name}")
+        raise ValidationError(f"工具名与内置/MCP 命名空间冲突: {name}")
     if tool_registry.name_exists(name):
-        raise HTTPException(status_code=400, detail=f"工具名已存在: {name}")
+        raise ValidationError(f"工具名已存在: {name}")
 
 
 @router.post("/api/tools/custom")
@@ -267,7 +310,7 @@ async def create_custom_tool(
     try:
         custom_tools.save(payload)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise ValidationError(str(exc)) from exc
     tool_registry.invalidate_tools_cache()
     return {"ok": True, "name": name}
 
@@ -277,12 +320,12 @@ async def update_custom_tool(
     name: str, payload: dict[str, Any], _: Annotated[None, Depends(require_auth)]
 ) -> dict[str, Any]:
     if custom_tools.get(name) is None:
-        raise HTTPException(status_code=404, detail=f"工具不存在: {name}")
+        raise NotFoundError(f"工具不存在: {name}")
     payload["name"] = name
     try:
         custom_tools.save(payload, overwrite=True)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise ValidationError(str(exc)) from exc
     tool_registry.invalidate_tools_cache()
     return {"ok": True}
 
@@ -292,7 +335,7 @@ async def delete_custom_tool(
     name: str, _: Annotated[None, Depends(require_auth)]
 ) -> dict[str, Any]:
     if not custom_tools.delete(name):
-        raise HTTPException(status_code=404, detail=f"工具不存在: {name}")
+        raise NotFoundError(f"工具不存在: {name}")
     tool_registry.invalidate_tools_cache()
     return {"ok": True}
 
@@ -302,9 +345,9 @@ async def toggle_custom_tool(
     name: str, payload: dict[str, Any], _: Annotated[None, Depends(require_auth)]
 ) -> dict[str, Any]:
     if "enabled" not in payload:
-        raise HTTPException(status_code=400, detail="缺少 enabled 字段")
+        raise ValidationError("缺少 enabled 字段")
     if not custom_tools.set_enabled(name, bool(payload["enabled"])):
-        raise HTTPException(status_code=404, detail=f"工具不存在: {name}")
+        raise NotFoundError(f"工具不存在: {name}")
     tool_registry.invalidate_tools_cache()
     return {"ok": True}
 
@@ -315,10 +358,10 @@ async def test_custom_tool(
 ) -> dict[str, Any]:
     tool = custom_tools.get(name)
     if tool is None:
-        raise HTTPException(status_code=404, detail=f"工具不存在: {name}")
+        raise NotFoundError(f"工具不存在: {name}")
     arguments = payload.get("arguments") or {}
     if not isinstance(arguments, dict):
-        raise HTTPException(status_code=400, detail="arguments 必须为对象")
+        raise ValidationError("arguments 必须为对象")
     if tool["type"] == "http":
         result = await custom_tools._run_http(tool, arguments)
     else:
@@ -335,14 +378,14 @@ async def list_mcp_servers(_: Annotated[None, Depends(require_auth)]) -> dict[st
 def _validate_mcp_cfg(cfg: dict[str, Any]) -> None:
     name = str(cfg.get("name", "")).strip()
     if not name:
-        raise HTTPException(status_code=400, detail="缺少 name 字段")
+        raise ValidationError("缺少 name 字段")
     transport = cfg.get("transport", "stdio")
     if transport not in ("stdio", "http", "sse"):
-        raise HTTPException(status_code=400, detail=f"不支持的 transport: {transport}")
+        raise ValidationError(f"不支持的 transport: {transport}")
     if transport == "stdio" and not str(cfg.get("command", "")).strip():
-        raise HTTPException(status_code=400, detail="stdio 传输必须提供 command")
+        raise ValidationError("stdio 传输必须提供 command")
     if transport in ("http", "sse") and not str(cfg.get("url", "")).strip():
-        raise HTTPException(status_code=400, detail=f"{transport} 传输必须提供 url")
+        raise ValidationError(f"{transport} 传输必须提供 url")
     cfg["name"] = name
 
 
@@ -354,7 +397,7 @@ async def create_mcp_server(
     name = payload["name"]
     servers = settings.mcp_servers()
     if any(s.get("name") == name for s in servers):
-        raise HTTPException(status_code=400, detail=f"MCP server 已存在: {name}")
+        raise ValidationError(f"MCP server 已存在: {name}")
     servers.append(payload)
     settings.update("mcp", {"servers": servers})
     mcp_mgr.upsert(payload)
@@ -370,7 +413,7 @@ async def update_mcp_server(
     servers = settings.mcp_servers()
     idx = next((i for i, s in enumerate(servers) if s.get("name") == name), None)
     if idx is None:
-        raise HTTPException(status_code=404, detail=f"MCP server 不存在: {name}")
+        raise NotFoundError(f"MCP server 不存在: {name}")
     payload["name"] = name
     _validate_mcp_cfg(payload)
     servers[idx] = payload
@@ -388,7 +431,7 @@ async def delete_mcp_server(
     servers = settings.mcp_servers()
     remaining = [s for s in servers if s.get("name") != name]
     if len(remaining) == len(servers):
-        raise HTTPException(status_code=404, detail=f"MCP server 不存在: {name}")
+        raise NotFoundError(f"MCP server 不存在: {name}")
     settings.update("mcp", {"servers": remaining})
     mcp_mgr.remove(name)
     tool_registry.invalidate_tools_cache()
@@ -400,7 +443,7 @@ async def reconnect_mcp_server(
     name: str, _: Annotated[None, Depends(require_auth)]
 ) -> dict[str, Any]:
     if not any(s.get("name") == name for s in settings.mcp_servers()):
-        raise HTTPException(status_code=404, detail=f"MCP server 不存在: {name}")
+        raise NotFoundError(f"MCP server 不存在: {name}")
     if mcp_mgr.get_handle(name) is None:
         for cfg in settings.mcp_servers():
             if cfg.get("name") == name:
@@ -444,14 +487,14 @@ async def upload_file(
     try:
         return save_upload(file.filename or "upload", content_type, data)
     except UploadError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise ValidationError(str(exc))
 
 
 @router.get("/api/files/{object_id}")
 async def get_file(object_id: str, _: Annotated[None, Depends(require_auth)]) -> Response:
     found = load_object_with_mime(object_id)
     if found is None:
-        raise HTTPException(status_code=404, detail="文件不存在")
+        raise NotFoundError("文件不存在")
     data, mime = found
     return Response(content=data, media_type=mime, headers={"Cache-Control": "private, max-age=86400"})
 
@@ -460,7 +503,7 @@ async def get_file(object_id: str, _: Annotated[None, Depends(require_auth)]) ->
 async def run_code(payload: dict[str, Any], _: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
     code = payload.get("code", "")
     if not code.strip():
-        raise HTTPException(status_code=400, detail="代码为空")
+        raise ValidationError("代码为空")
     result = await executor.execute(code)
     return {
         "stdout": result.stdout,
@@ -479,7 +522,7 @@ async def manual_compress(
     _reject_busy_session(session_id)
     messages = sessions.load(session_id)
     if not messages:
-        raise HTTPException(status_code=404, detail="会话不存在或为空")
+        raise NotFoundError("会话不存在或为空")
     # 压缩前先把流式碎片合并，避免摘要里出现大量 assistant_delta 片段
     sessions.collapse_deltas(session_id)
     compressed = await compressor.compress(sessions.load(session_id))
@@ -488,8 +531,24 @@ async def manual_compress(
 
 
 @router.get("/api/sessions")
-async def list_sessions(_: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
-    return {"sessions": sessions.list_sessions()}
+async def list_sessions(
+    _: Annotated[None, Depends(require_auth)],
+    limit: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE, description="返回条数上限")] = 50,
+    offset: Annotated[int, Query(ge=0, description="跳过的条数")] = 0,
+    q: Annotated[str, Query(max_length=100, description="按标题/内容关键字过滤")] = "",
+) -> dict[str, Any]:
+    """会话列表（按最后更新时间倒序），支持分页与关键字过滤。
+
+    会话累积较多时，前端应使用 limit/offset 分页，避免一次性拉全量。
+    """
+    page, total = sessions.list_sessions_page(limit=limit, offset=offset, keyword=q.strip())
+    return {
+        "sessions": page,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(page) < total,
+    }
 
 
 @router.post("/api/sessions")
@@ -501,7 +560,7 @@ async def create_session(_: Annotated[None, Depends(require_auth)]) -> dict[str,
 @router.get("/api/sessions/{session_id}")
 async def get_session(session_id: str, _: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
     if not sessions.exists(session_id):
-        raise HTTPException(status_code=404, detail="会话不存在")
+        raise NotFoundError("会话不存在")
     return {
         "id": session_id,
         "messages": sessions.load(session_id),
@@ -513,7 +572,7 @@ async def get_session(session_id: str, _: Annotated[None, Depends(require_auth)]
 async def delete_session(session_id: str, _: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
     _reject_busy_session(session_id)
     if not sessions.delete(session_id):
-        raise HTTPException(status_code=404, detail="会话不存在")
+        raise NotFoundError("会话不存在")
     return {"ok": True}
 
 
@@ -521,7 +580,7 @@ async def delete_session(session_id: str, _: Annotated[None, Depends(require_aut
 async def clear_session(session_id: str, _: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
     _reject_busy_session(session_id)
     if not sessions.exists(session_id):
-        raise HTTPException(status_code=404, detail="会话不存在")
+        raise NotFoundError("会话不存在")
     sessions.clear(session_id)
     return {"ok": True}
 
@@ -533,7 +592,7 @@ async def archive_session(
     _reject_busy_session(session_id)
     dest = sessions.archive(session_id)
     if dest is None:
-        raise HTTPException(status_code=404, detail="会话不存在")
+        raise NotFoundError("会话不存在")
     return {"ok": True, "archived": dest.name}
 
 
@@ -547,7 +606,7 @@ async def rename_session(
     try:
         sessions.rename(session_id, title)
     except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="会话不存在")
+        raise NotFoundError("会话不存在")
     return {"ok": True, "id": session_id, "title": title}
 
 
@@ -562,7 +621,7 @@ async def export_session(
     sessions.collapse_deltas(session_id)
     messages = sessions.load(session_id)
     if not messages:
-        raise HTTPException(status_code=404, detail="会话不存在或为空")
+        raise NotFoundError("会话不存在或为空")
     meta = next(
         (s for s in sessions.list_sessions() if s["id"] == session_id), {}
     )
@@ -616,6 +675,25 @@ _LOGIN_ATTEMPT_MAX = 5        # 窗口内最大失败次数
 _LOGIN_WINDOW = 60.0          # 失败计数窗口（秒）
 _LOGIN_LOCKOUT = 300.0        # 触发上限后的锁定时长（秒）
 _login_failures: dict[str, list[float]] = {}  # ip -> 失败时间戳
+# 失败表上限：防止伪造大量来源 IP 造成内存无界增长
+_LOGIN_TRACK_MAX = 10_000
+
+
+def _client_ip(request: Request) -> str:
+    """取真实来源 IP。
+
+    nginx/IIS 等反向代理下 request.client 是代理地址，需优先取
+    X-Forwarded-For 首段（最靠近客户端的一跳）；仅在信任代理时采信该头，
+    避免攻击者直接伪造该头绕过限流。
+    """
+    if runtime.trust_proxy:
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        real_ip = request.headers.get("x-real-ip", "").strip()
+        if real_ip:
+            return real_ip
+    return request.client.host if request.client else "unknown"
 
 
 def _login_guard(ip: str) -> None:
@@ -625,12 +703,22 @@ def _login_guard(ip: str) -> None:
     _login_failures[ip] = recent
     # 仅统计计数窗口内的失败
     if sum(1 for t in recent if now - t < _LOGIN_WINDOW) >= _LOGIN_ATTEMPT_MAX:
-        raise HTTPException(status_code=429, detail="尝试过于频繁，请 5 分钟后再试")
+        raise RateLimitedError("尝试过于频繁，请 5 分钟后再试")
+
+
+def _record_login_failure(ip: str) -> None:
+    """登记一次失败；表满时清理最早过期的条目防无界增长。"""
+    _login_failures.setdefault(ip, []).append(time.monotonic())
+    if len(_login_failures) > _LOGIN_TRACK_MAX:
+        cutoff = time.monotonic() - _LOGIN_LOCKOUT
+        for key in [k for k, v in _login_failures.items() if not any(t > cutoff for t in v)]:
+            _login_failures.pop(key, None)
 
 
 @router.post("/api/auth/login")
 async def login(payload: dict[str, Any], request: Request) -> dict[str, Any]:
-    ip = request.client.host if request.client else "unknown"
+    """凭据换取 JWT。失败按来源 IP 计数，超过阈值锁定 5 分钟。"""
+    ip = _client_ip(request)
     if not auth.auth_enabled():
         return {"token": auth.create_jwt(), "auth_enabled": False}
     _login_guard(ip)
@@ -641,8 +729,10 @@ async def login(payload: dict[str, Any], request: Request) -> dict[str, Any]:
     if auth.check_bearer(payload.get("api_key", "")):
         _login_failures.pop(ip, None)
         return {"token": auth.create_jwt(), "auth_enabled": True}
-    _login_failures.setdefault(ip, []).append(time.monotonic())
-    raise HTTPException(status_code=401, detail="凭据无效")
+    _record_login_failure(ip)
+    logger.warning("登录失败 ip=%s", ip)
+    # 凭据错误统一回同一提示，避免暴露「用户名/密钥格式」等细节
+    raise UnauthorizedError("凭据无效")
 
 
 # ---------- 统计 ----------

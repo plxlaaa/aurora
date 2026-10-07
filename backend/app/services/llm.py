@@ -21,6 +21,11 @@ _TRANSIENT_MAX = 2
 _TRANSIENT_BACKOFF = 3.0
 
 DEFAULT_TIMEOUT = 120.0
+# 探测类请求应快速失败，避免慢端点拖住启动/保存配置的交互
+PROBE_TIMEOUT = 15.0
+# 单端点连接池上限：与网关并发生成上限匹配，避免连接泄漏与端口耗尽
+POOL_MAX_CONNECTIONS = 16
+POOL_MAX_KEEPALIVE = 8
 
 
 @dataclass
@@ -37,12 +42,17 @@ class EndpointInfo:
     error: str = ""                                  # 最近一次探测失败原因
 
 
-def _build_client(base_url: str, api_key: str) -> httpx.AsyncClient:
+def _build_client(base_url: str, api_key: str, timeout: float = DEFAULT_TIMEOUT) -> httpx.AsyncClient:
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     return httpx.AsyncClient(
         base_url=base_url.rstrip("/"),
         headers=headers,
-        timeout=DEFAULT_TIMEOUT,
+        timeout=timeout,
+        limits=httpx.Limits(
+            max_connections=POOL_MAX_CONNECTIONS,
+            max_keepalive_connections=POOL_MAX_KEEPALIVE,
+            keepalive_expiry=30.0,
+        ),
     )
 
 
@@ -67,7 +77,8 @@ class LLMClient:
             self.info.error = "未配置 base_url"
             return
         try:
-            resp = await self._client.get("/models")
+            # 探测用更短超时：慢/不可达端点不应拖住启动与配置保存的响应
+            resp = await self._client.get("/models", timeout=PROBE_TIMEOUT)
             resp.raise_for_status()
             data = resp.json()
             models = data.get("data", [])
@@ -272,6 +283,20 @@ class ModelRegistry:
     def get(self, name: str) -> LLMClient | None:
         return self._clients.get(name)
 
+    def any_available(self) -> bool:
+        """是否存在至少一个探测成功的端点（就绪探针用）。"""
+        return any(c.info.available for c in self._clients.values())
+
+    async def close_all(self) -> None:
+        """关闭全部端点连接池（含待回收的旧客户端），进程退出/重载时调用。"""
+        current, self._clients = self._clients, {}
+        for client in [*current.values(), *self._to_close]:
+            try:
+                await client.aclose()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("关闭端点 %s 连接失败: %s", client.info.name, exc)
+        self._to_close.clear()
+
     def snapshot(self) -> dict[str, Any]:
         """返回前端设置页所需的状态快照。"""
         out: dict[str, Any] = {}
@@ -287,5 +312,29 @@ class ModelRegistry:
                 "enabled": ep.enabled,
                 "models": ep.models,
                 "error": ep.error,
+                # base_url 可能内嵌凭据（部分中转站用 url 内 api_key），快照中脱敏
+                "base_url_masked": _mask_url(ep.base_url),
             }
         return out
+
+
+def _mask_url(url: str) -> str:
+    """脱敏 URL 中可能内嵌的凭据（user:pass@host 或 key 查询参数）。"""
+    if not url:
+        return ""
+    try:
+        from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+        parts = urlsplit(url)
+        netloc = parts.netloc
+        if "@" in netloc:
+            userinfo, _, host = netloc.rpartition("@")
+            name = userinfo.split(":", 1)[0]
+            netloc = f"{name}:***@{host}"
+        query = [
+            (k, "***" if k.lower() in ("key", "api_key", "apikey", "token", "access_token") else v)
+            for k, v in parse_qsl(parts.query, keep_blank_values=True)
+        ]
+        return urlunsplit((parts.scheme, netloc, parts.path, urlencode(query), parts.fragment))
+    except Exception:  # noqa: BLE001
+        return url

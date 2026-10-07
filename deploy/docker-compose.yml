@@ -1,0 +1,83 @@
+# =============================================================================
+# Aurora 网关 docker-compose 部署（单机自包含）
+#
+# 用法：
+#   cp deploy/.env.example deploy/.env && vi deploy/.env   # 填密钥
+#   docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d
+#
+# 访问：http://<服务器IP>:8080
+# 说明：镜像内已内置前端产物，网关直接托管，无需额外 nginx。
+#       如需 HTTPS/域名，见 INSTALL.md「Docker + HTTPS」一节。
+# =============================================================================
+
+name: aurora
+
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/docker/Dockerfile
+      args:
+        # 加速国内拉取基础镜像（可留空使用官方源）
+        PYTHON_BASE: ${PYTHON_BASE:-python:3.11-slim}
+    image: aurora-gateway:${AURORA_VERSION:-1.1.0}
+    container_name: aurora-gateway
+    restart: unless-stopped
+    ports:
+      # 仅为回环地址时，外部需经 nginx/IIS 反代；改为 "8080:8080" 可直接对外
+      - "${AURORA_BIND:-127.0.0.1}:${AURORA_PORT:-8080}:8080"
+    environment:
+      # 鉴权：留空则关闭鉴权（仅建议内网/本地调试时使用）
+      AI_ASSISTANT_API_KEY: ${AI_ASSISTANT_API_KEY:-}
+      # JWT 签名密钥：显式设置可保证重启后已签发 token 依然有效
+      AI_ASSISTANT_JWT_SECRET: ${AI_ASSISTANT_JWT_SECRET:-}
+      AI_ASSISTANT_PRODUCTION: ${AI_ASSISTANT_PRODUCTION:-true}
+      AI_ASSISTANT_LOG_LEVEL: ${AI_ASSISTANT_LOG_LEVEL:-INFO}
+      AI_ASSISTANT_CORS_ORIGINS: ${AI_ASSISTANT_CORS_ORIGINS:-}
+      AI_ASSISTANT_MAX_CONCURRENT_GENERATIONS: ${AI_ASSISTANT_MAX_CONCURRENT_GENERATIONS:-3}
+      AI_ASSISTANT_MAX_BODY_MB: ${AI_ASSISTANT_MAX_BODY_MB:-24}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      # 配置：容器内只读挂载，避免误改；改配置请编辑宿主机的 config/*.yaml
+      - ${AURORA_CONFIG_DIR:-../config}:/app/config:ro
+      # 数据与密钥覆盖层需可写
+      - aurora_data:/app/data
+      - aurora_logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    # 本地执行模式需要访问 docker socket（沙箱模式不需要，保留注释）
+    # volumes:
+    #   - /var/run/docker.sock:/var/run/docker.sock
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # 可选：docker-compose 内置 nginx（需域名/证书时启用）
+  # 启用步骤：1) 取消本段注释；2) 准备 deploy/nginx/certs 证书；
+  #          3) 设置 NGINX_SERVER_NAME 与 NGINX_HTTP_PORT
+  # ---------------------------------------------------------------------------
+  # nginx:
+  #   image: nginx:1.27-alpine
+  #   restart: unless-stopped
+  #   ports:
+  #     - "${NGINX_HTTP_PORT:-80}:80"
+  #     - "${NGINX_HTTPS_PORT:-443}:443"
+  #   volumes:
+  #     - ./nginx/docker.conf:/etc/nginx/conf.d/default.conf:ro
+  #     - ./nginx/certs:/etc/nginx/certs:ro
+  #   depends_on:
+  #     gateway:
+  #       condition: service_healthy
+
+volumes:
+  aurora_data:
+    name: aurora_data
+  aurora_logs:
+    name: aurora_logs
