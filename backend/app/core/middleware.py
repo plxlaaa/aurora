@@ -194,7 +194,25 @@ class _TooLarge(Exception):
 
 
 class GZipMiddleware:
-    """对文本类响应做 gzip 压缩，显著降低会话/工具快照的传输体积。"""
+    """对文本类响应做 gzip 压缩，显著降低会话/工具快照的传输体积。
+
+    实现要点（分块响应必须整体压缩后才能声明 content-encoding）：
+    响应头 `Content-Encoding: gzip` 一旦发出就代表「整个响应体都是 gzip 流」，
+    因此不能只压缩最后一个 chunk——那样客户端按 gzip 解压整条字节流会直接报错，
+    大体积静态资源（前端 assets 等多块响应）会整体损坏。
+
+    这里采用「整体缓冲后再决定」策略：
+    - 先把响应体缓冲起来，**只有在确认总量落在 [min_size, MAX_BUFFER_BYTES]
+      区间内时**才压缩并补gzip 头；
+    - 累计量超过 MAX_BUFFER_BYTES（超大文件）立即放弃压缩，转为原样透传，
+      绝不把整份大文件读进内存；
+    - 已知 Content-Length 时可在收到响应头阶段就提前判定，避免无谓缓冲。
+
+    对 SSE / 图片 / 视频等流式或已压缩类型，本中间件直接跳过。
+    """
+
+    # 超过该字节数的响应不再缓冲压缩，直接透传（防止大文件占内存）
+    MAX_BUFFER_BYTES = 8 * 1024 * 1024
 
     def __init__(self, app: Any, *, min_size: int = GZIP_MIN_SIZE) -> None:
         self.app = app
@@ -234,41 +252,102 @@ class GZipMiddleware:
             await self.app(scope, receive, send)
             return
 
-        state: dict[str, Any] = {"compress": False, "started": False}
+        # 响应头与响应体全部先缓冲，待拿到**完整响应体**后再统一决定压缩与否。
+        # 这样「压缩 / 透传」只决策一次，不会出现「已发 gzip 头又发现太大来不及压缩」
+        # 或「只压缩了尾块」的半截状态。
+        pending_start: dict[str, Any] | None = None
+        chunks: list[bytes] = []
+        total = 0
+        # True=原始透传（已确定不压缩）；False=仍需缓冲等待最终决策
+        passthrough = False
+
+        async def _emit(
+            start: dict[str, Any], body_chunks: list[bytes], size: int, min_size: int
+        ) -> None:
+            """按最终决策发出响应头与响应体（整体压缩或原样透传）。"""
+            raw = b"".join(body_chunks)
+            if size >= min_size:
+                compressed = gzip.compress(raw, compresslevel=6)
+                headers_out: list[tuple[bytes, bytes]] = [
+                    (k, v) for k, v in start.get("headers", [])
+                    if k.decode("latin-1").lower() not in ("content-length", "content-encoding")
+                ]
+                headers_out.append((b"content-encoding", b"gzip"))
+                headers_out.append((b"vary", b"accept-encoding"))
+                headers_out.append((b"content-length", str(len(compressed)).encode("latin-1")))
+                start = {**start, "headers": headers_out}
+                await send(start)
+                await send({"type": "http.response.body", "body": compressed, "more_body": False})
+            else:
+                await send(start)
+                await send({"type": "http.response.body", "body": raw, "more_body": False})
 
         async def send_wrapper(message: dict[str, Any]) -> None:
+            nonlocal pending_start, total, passthrough, chunks
+
             if message["type"] == "http.response.start":
-                message = {**message, "headers": list(message.get("headers", []))}
-                if message["status"] < 400 and self._should_compress(message["headers"], self.min_size):
-                    raw: list[tuple[bytes, bytes]] = [
-                        (k, v) for k, v in message["headers"]
-                        if k.decode("latin-1").lower() not in ("content-length", "content-encoding")
-                    ]
-                    raw.append((b"content-encoding", b"gzip"))
-                    raw.append((b"vary", b"accept-encoding"))
-                    message["headers"] = raw
-                    state["compress"] = True
-                state["started"] = True
+                pending_start = message
+                eligible = message["status"] < 400 and self._should_compress(
+                    message.get("headers", []), self.min_size
+                )
+                if not eligible:
+                    passthrough = True
+                else:
+                    # 已知 Content-Length 时可提前判定，避免为注定透传的响应做无谓缓冲
+                    declared = 0
+                    for key, value in message.get("headers", []):
+                        if key.decode("latin-1").lower() == "content-length":
+                            try:
+                                declared = int(value)
+                            except ValueError:
+                                declared = 0
+                    # 不足阈值（压缩无收益）或超出缓冲上限（不应读进内存）→ 直接透传
+                    if 0 < declared < self.min_size or declared > self.MAX_BUFFER_BYTES:
+                        passthrough = True
+                return
+
+            if message["type"] != "http.response.body":
                 await send(message)
                 return
 
-            if message["type"] == "http.response.body" and state.get("compress"):
-                body = message.get("body", b"")
-                more = message.get("more_body", False)
-                # 最后一个非空块且整体足够大才压缩；空 body 直接透传
-                if not more and body and len(body) >= self.min_size:
-                    compressed = gzip.compress(body, compresslevel=6)
-                    message = {
-                        **message,
-                        "body": compressed,
-                        "headers": [(k, v) for k, v in message.get("headers", [])]
-                        + [(b"content-length", str(len(compressed)).encode("latin-1"))],
-                    }
-                    await send(message)
-                    return
-            await send(message)
+            body = message.get("body", b"")
 
-        await self.app(scope, receive, send_wrapper)
+            if passthrough:
+                # 尚未发出响应头时，先把头补发出去
+                if pending_start is not None:
+                    start, pending_start = pending_start, None
+                    await send(start)
+                await send(message)
+                return
+
+            chunks.append(body)
+            total += len(body)
+            # 超大响应：放弃压缩，转为原样透传。
+            # 注意必须把已缓冲的分块一并 flush 出去，否则这些字节会被丢弃（数据丢失）。
+            if total > self.MAX_BUFFER_BYTES:
+                passthrough = True
+                more = bool(message.get("more_body"))
+                if pending_start is not None:
+                    start, pending_start = pending_start, None
+                    await send(start)
+                # 已缓冲内容 + 当前块合并为一块发出，后续块走透传分支
+                await send({"type": "http.response.body", "body": b"".join(chunks), "more_body": more})
+                chunks, total = [], 0
+                return
+            # 收到结束块 → 缓冲完整，统一决策并发出
+            if pending_start is not None and not message.get("more_body"):
+                start, pending_start = pending_start, None
+                await _emit(start, chunks, total, self.min_size)
+                chunks, total = [], 0
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        finally:
+            # 收尾：应用未发结束块（如抛异常中断）时把已缓冲内容刷出，
+            # 避免请求停在「头未发」或「体未发」的半截状态。
+            if pending_start is not None or chunks:
+                start = pending_start or {"type": "http.response.start", "status": 200, "headers": []}
+                await _emit(start, chunks, total, self.min_size)
 
 
 def install(app: Any, *, max_body_bytes: int, slow_request_ms: int = 30_000) -> None:

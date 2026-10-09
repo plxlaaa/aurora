@@ -680,6 +680,10 @@ _LOGIN_LOCKOUT = 300.0        # 触发上限后的锁定时长（秒）
 _login_failures: dict[str, list[float]] = {}  # ip -> 失败时间戳
 # 失败表上限：防止伪造大量来源 IP 造成内存无界增长
 _LOGIN_TRACK_MAX = 10_000
+# 上次清理过期条目的时间戳：避免每次失败都全表扫描
+_login_last_sweep = 0.0
+# 清理扫描的最小间隔（秒）
+_LOGIN_SWEEP_INTERVAL = 60.0
 
 
 def _client_ip(request: Request) -> str:
@@ -699,6 +703,24 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _sweep_login_failures(now: float) -> None:
+    """周期性清理已过期的失败记录（限频执行，避免每次登录都全表扫描）。
+
+    登录是低频操作，但攻击者可高频调用；若无界增长会持续占用内存。
+    这里按固定间隔做一次全表清理，把「锁定窗口」之外的条目尽早回收。
+    """
+    global _login_last_sweep
+    if now - _login_last_sweep < _LOGIN_SWEEP_INTERVAL:
+        return
+    _login_last_sweep = now
+    cutoff = now - _LOGIN_LOCKOUT
+    expired = [ip for ip, ts in _login_failures.items() if not any(t > cutoff for t in ts)]
+    for ip in expired:
+        _login_failures.pop(ip, None)
+    if expired:
+        logger.debug("清理过期登录失败记录 %d 条", len(expired))
+
+
 def _login_guard(ip: str) -> None:
     """超限则拒绝；失败记录自动过期（按锁定窗口过滤）。"""
     now = time.monotonic()
@@ -707,6 +729,7 @@ def _login_guard(ip: str) -> None:
     # 仅统计计数窗口内的失败
     if sum(1 for t in recent if now - t < _LOGIN_WINDOW) >= _LOGIN_ATTEMPT_MAX:
         raise RateLimitedError("尝试过于频繁，请 5 分钟后再试")
+    _sweep_login_failures(now)
 
 
 def _record_login_failure(ip: str) -> None:
@@ -898,9 +921,26 @@ async def chat(ws: WebSocket) -> None:
     def busy() -> bool:
         return current_task is not None and not current_task.done()
 
+    # 心跳：客户端需周期性发送 {"type":"ping"}，服务端回{"type":"pong"}。
+    # 超过 WS_IDLE_TIMEOUT 秒未收到任何消息即判定连接已断开，主动回收，
+    # 避免客户端静默掉线（网络中断/页面关闭）后连接与生成任务长期残留。
+    WS_IDLE_TIMEOUT = 300.0
+
+    async def receive_with_heartbeat() -> dict[str, Any]:
+        """带空闲超时的接收：超时则关闭连接并抛出以跳出主循环。"""
+        return await asyncio.wait_for(ws.receive_json(), timeout=WS_IDLE_TIMEOUT)
+
     try:
         while True:
-            msg = await ws.receive_json()
+            try:
+                msg = await receive_with_heartbeat()
+            except asyncio.TimeoutError:
+                logger.info("WebSocket 空闲超时（%.0fs 无心跳），主动关闭连接", WS_IDLE_TIMEOUT)
+                try:
+                    await ws.close(code=1001)
+                except Exception:  # noqa: BLE001
+                    pass
+                break
             msg_type = msg.get("type", "message")
             if msg_type == "ping":
                 await ws.send_json({"type": "pong"})

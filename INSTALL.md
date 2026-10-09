@@ -190,10 +190,35 @@ sudo bash deploy/install.sh --check-upgrade
 
 # 安装并立即启动（脚本末尾自动做健康检查）
 sudo bash deploy/install.sh --start
+
+# 仅做健康 / 就绪检查（带重试轮询，可重复执行）
+sudo bash deploy/install.sh --health-check
 ```
 
 > `--with-firewall` 会同时识别 **ufw**（Debian/Ubuntu）与 **firewalld**（RHEL/CentOS/Fedora）；
 > 卸载时（`--uninstall` / `--purge`）会自动清理对应的放行规则。
+
+> `--health-check` 会带重试轮询（默认约 20s）并同时探测 `/api/health`（存活）与
+> `/api/ready`（就绪），避免服务刚启动时的单次探测误判失败。
+
+### 8. 日志容量治理（自动配置）
+
+安装脚本会自动写入两份配置，防止长期运行后日志占满磁盘：
+
+| 文件 | 内容 | 作用 |
+|------|------|------|
+| `/etc/systemd/journald.conf.d/99-aiassistant.conf` | `SystemMaxUse=500M`、`MaxRetentionSec=2week` | 限制 journald 总容量与保留时长 |
+| `/etc/logrotate.d/aiassistant` | `daily`、`rotate 14`、`copytruncate` | 文件日志每日轮转、保留 14 份 |
+
+生效方式与手动调整：
+
+```bash
+sudo systemctl restart systemd-journald      # journald 配置改后需重启
+sudo vi /etc/logrotate.d/aiassistant
+sudo logrotate -d /etc/logrotate.d/aiassistant   # -d 为 dry-run，先验证再执行
+```
+
+卸载（`--uninstall` / `--purge`）时这两份配置会被同步清理。
 
 ---
 
@@ -211,14 +236,14 @@ cd frontend && npm ci && npm run build && cd ..     # 先构建前端产物
 bash scripts/package-tarball.sh
 
 # 或：预建 venv + 自动构建前端（目标机免编译，适合批量部署）
-bash scripts/package-tarball.sh --with-venv --with-frontend --version 1.1.0
+bash scripts/package-tarball.sh --with-venv --with-frontend --version 1.3.0
 ```
 
 产物位于 `dist/`：
 
 ```
-dist/aurora-1.1.0-linux-amd64.tar.gz
-dist/aurora-1.1.0-linux-amd64.tar.gz.sha256
+dist/aurora-1.3.0-linux-amd64.tar.gz
+dist/aurora-1.3.0-linux-amd64.tar.gz.sha256
 ```
 
 包内已包含后端源码、前端 `dist`、配置模板、systemd unit、nginx 模板与一键安装脚本。
@@ -226,16 +251,16 @@ dist/aurora-1.1.0-linux-amd64.tar.gz.sha256
 ### 2. 拷贝到目标机并校验
 
 ```bash
-scp dist/aurora-1.1.0-linux-amd64.tar.gz*  user@server:/tmp/
-cd /tmp && sha256sum -c aurora-1.1.0-linux-amd64.tar.gz.sha256
+scp dist/aurora-1.3.0-linux-amd64.tar.gz*  user@server:/tmp/
+cd /tmp && sha256sum -c aurora-1.3.0-linux-amd64.tar.gz.sha256
 # 必须显示 OK 再继续
 ```
 
 ### 3. 解压并安装
 
 ```bash
-sudo tar -xzf aurora-1.1.0-linux-amd64.tar.gz -C /opt
-sudo bash /opt/aurora-1.1.0/install-tarball.sh
+sudo tar -xzf aurora-1.3.0-linux-amd64.tar.gz -C /opt
+sudo bash /opt/aurora-1.3.0/install-tarball.sh
 ```
 
 安装脚本支持：
@@ -249,8 +274,8 @@ sudo bash /opt/aurora-1.1.0/install-tarball.sh
 
 ```bash
 # 常用组合
-sudo bash /opt/aurora-1.1.0/install-tarball.sh --no-systemd   # 纯容器环境
-sudo bash /opt/aurora-1.1.0/install-tarball.sh --purge        # 彻底卸载
+sudo bash /opt/aurora-1.3.0/install-tarball.sh --no-systemd   # 纯容器环境
+sudo bash /opt/aurora-1.3.0/install-tarball.sh --purge        # 彻底卸载
 ```
 
 ### 4. 安装后配置密钥并启动
@@ -286,7 +311,7 @@ curl http://127.0.0.1:8080/api/health
 powershell -ExecutionPolicy Bypass -File deploy\windows\install.ps1 -RegisterService
 ```
 
-脚本完成：检测依赖 → 创建目录 → 建 venv 装依赖 → 构建前端 → 生成 `gateway.env` → 配置防火墙 → 注册服务（NSSM，自动重启策略）→ 冒烟健康检查。
+脚本完成：检测依赖 → 创建目录 → 建 venv 装依赖 → 构建前端 → 生成 `gateway.env` → 配置防火墙 → 注册服务（NSSM，自动重启策略）→ **带重试的健康 / 就绪检查**。
 
 ### 3. 安装参数
 
@@ -299,6 +324,12 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\install.ps1 -RegisterSer
 
 # 安装但不注册服务（手动运行）
 .\deploy\windows\install.ps1
+
+# 需要直接从外部访问 8080（自动放行入站防火墙；默认不暴露，经 IIS/nginx 反代）
+.\deploy\windows\install.ps1 -RegisterService -PublicPort 8080
+
+# 服务启动较慢时放宽健康检查（最多 30 次 × 2 秒 ≈ 60s）
+.\deploy\windows\install.ps1 -RegisterService -HealthRetries 30
 ```
 
 完整参数：
@@ -309,10 +340,19 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\install.ps1 -RegisterSer
 | `-Port` | `8080` | 网关监听端口 |
 | `-ApiKey` | 自动生成 | 鉴权密钥，留空则自动生成随机强密钥 |
 | `-RegisterService` | 关闭 | 注册为 Windows 服务（开机自启、崩溃自动重启） |
+| `-PublicPort` | `0`（不暴露） | 对外暴露端口；指定后自动放行入站 TCP。默认仅监听 `127.0.0.1` |
 | `-ServiceUser` | `LocalSystem` | 服务运行账户 |
 | `-SkipFrontend` | 关闭 | 跳过前端构建 |
+| `-HealthRetries` | `10` | 健康检查重试次数（每次间隔 2 秒，共约 20s） |
 | `-Uninstall` | — | 卸载（保留数据） |
 | `-PurgeData` | — | 与 `-Uninstall` 搭配，**删除全部数据** |
+
+> **健康检查为什么需要重试**：服务注册后需数秒加载配置与探测模型端点，单次探测容易误判失败。
+> 脚本会轮询 `/api/health` 确认存活，再探测 `/api/ready` 确认就绪（端点、MCP、插件均已加载）。
+>
+> **`-PublicPort` 语义**：默认网关只监听 `127.0.0.1`，因此**不创建任何入站防火墙规则**（外部无法直连）。
+> 只有显式指定 `-PublicPort <端口>` 才会放行——生产环境仍建议只放行 IIS / nginx 的 80 / 443，
+> 由反代进入网关。
 
 ### 4. 服务管理
 
@@ -355,19 +395,19 @@ powershell -ExecutionPolicy Bypass -File scripts\package-windows.ps1 -Version 1.
 产物：
 
 ```
-dist\aurora-1.1.0-windows-x64.zip
-dist\aurora-1.1.0-windows-x64.zip.sha256
+dist\aurora-1.3.0-windows-x64.zip
+dist\aurora-1.3.0-windows-x64.zip.sha256
 ```
 
 ### 2. 目标机离线安装
 
 ```powershell
 # 校验（PowerShell）
-(Get-FileHash .\aurora-1.1.0-windows-x64.zip -Algorithm SHA256).Hash
+(Get-FileHash .\aurora-1.3.0-windows-x64.zip -Algorithm SHA256).Hash
 
 # 解压后以管理员身份安装
-Expand-Archive .\aurora-1.1.0-windows-x64.zip -DestinationPath C:\Temp\aurora
-powershell -ExecutionPolicy Bypass -File C:\Temp\aurora\aurora-1.1.0-windows-x64\install.ps1 -RegisterService
+Expand-Archive .\aurora-1.3.0-windows-x64.zip -DestinationPath C:\Temp\aurora
+powershell -ExecutionPolicy Bypass -File C:\Temp\aurora\aurora-1.3.0-windows-x64\install.ps1 -RegisterService
 ```
 
 ### 3. winget / scoop 分发
@@ -725,6 +765,30 @@ proxy_set_header Upgrade $http_upgrade;
 proxy_set_header Connection "upgrade";
 proxy_read_timeout 3600s;
 ```
+
+> **服务端主动断开**：空闲超过 **300 秒**（未收到任何 `ping` 或消息）网关会以
+> `close(1001)` 回收连接，这是防资源泄漏的正常行为。若客户端要保持长连接，请周期性发送
+> `{"type":"ping"}`（服务端回 `pong`）。中间的反向代理需保证 `proxy_read_timeout` 大于 300s。
+
+### 安装脚本健康检查失败
+
+安装脚本的健康检查带重试轮询（Linux 与 Windows 均如此）。若最终仍失败，按以下顺序排查：
+
+```bash
+# 1. 服务本身是否在跑
+sudo systemctl status aiassistant-gateway      # Windows: Get-Service AuroraGateway
+curl -v http://127.0.0.1:8080/api/health        # Windows: Invoke-WebRequest ... -UseBasicParsing
+
+# 2. 就绪详情（返回 endpoints_available / mcp / plugins）
+curl http://127.0.0.1:8080/api/ready
+
+# 3. 看启动日志找根因
+sudo journalctl -u aiassistant-gateway -n 100 --no-pager
+```
+
+- 模型端点未起时 `/api/health` 仍应返回 200（存活语义），只有 `/api/ready` 会报 `ready: false`；
+- 服务启动确实很慢（大模型冷加载）时，Windows 可加大 `-HealthRetries 30`；
+- 端口被占用导致服务未监听：`sudo ss -tlnp | grep 8080` / `Get-NetTCPConnection -LocalPort 8080`。
 
 ### 上传大图失败（413）
 

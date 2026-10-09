@@ -19,6 +19,7 @@
 | 用量统计 | 内置 stats 插件 + 生命周期钩子扩展点 |
 | 统一鉴权 | JWT / API Key，登录失败按 IP 限流 |
 | 可观测性 | 结构化 JSON 日志（自动注入 request_id）、慢请求告警、健康/就绪探针 |
+| 数据可靠性 | 会话原子写入（断电不损坏历史）、孤儿索引回收、WebSocket 心跳保活 |
 | 部署友好 | systemd / Docker / Windows 服务 / WSL2 / 离线包一键安装 |
 
 ## 快速开始
@@ -58,8 +59,8 @@ powershell -ExecutionPolicy Bypass -File deploy\windows\install.ps1 -RegisterSer
 # Linux：产出 dist/aurora-<版本>-linux-<arch>.tar.gz
 cd frontend && npm ci && npm run build && cd ..
 bash scripts/package-tarball.sh
-sudo tar -xzf aurora-1.1.0-linux-amd64.tar.gz -C /opt
-sudo bash /opt/aurora-1.1.0/install-tarball.sh
+sudo tar -xzf aurora-1.3.0-linux-amd64.tar.gz -C /opt
+sudo bash /opt/aurora-1.3.0/install-tarball.sh
 ```
 
 ```powershell
@@ -123,14 +124,18 @@ wsl -d Ubuntu-22.04 -- bash -lc "cd ~/aurora && sudo bash deploy/wsl2/install-ws
 │   │   └── routers/               # API 路由层
 │   │       ├── deps.py            #   共享单例装配 + 启停逻辑
 │   │       └── api.py             #   REST + WebSocket 端点
-│   ├── tests/                     # 单元与集成测试（unittest，254 项）
+│   ├── tests/                     # 单元与集成测试（pytest，321 项）
+│   │   ├── test_middleware_gzip.py #  gzip 多块响应压缩回归（原始 ASGI 层验证）
+│   │   ├── test_static_mount.py    #  静态托管与路径穿越回归
+│   │   ├── test_sessions_durability.py #  会话原子写与孤儿回收
+│   │   └── test_ws_and_login_guard.py  #  WebSocket 心跳与登录限流清理
 │   └── requirements.txt
 ├── frontend/                      # Vue 3 单页应用（Vite）
 │   ├── package.json / vite.config.js / index.html
 │   └── src/{main.js, App.vue, api/, router/, views/, components/}
 └── deploy/
-    ├── install.sh                 # Linux 安装 / 升级 / 卸载（含防火墙、版本检查）
-    ├── windows/install.ps1        # Windows 一键安装（NSSM 服务）
+    ├── install.sh                 # Linux 安装 / 升级 / 卸载（防火墙、健康检查、journald/logrotate）
+    ├── windows/install.ps1        # Windows 一键安装（NSSM 服务、-HealthRetries、-PublicPort）
     ├── windows/winget/            # winget 分发清单
     ├── windows/scoop/             # scoop 分发清单
     ├── wsl2/                      # WSL2 部署（PowerShell 包装器 + Linux 侧脚本）
@@ -171,7 +176,7 @@ npm run dev
 测试：
 
 ```bash
-cd backend && venv/bin/python -m unittest discover -s tests -v   # 254 项
+cd backend && venv/bin/python -m pytest tests/ -q         # 321 项
 ```
 
 ## 配置说明
@@ -243,6 +248,35 @@ sudo journalctl -u aiassistant-gateway --since today -p warning
 
 `request_id` 由中间件统一分配（透传上游 `X-Request-ID`），并通过上下文自动附加到该请求内的
 所有业务日志，访问日志与业务日志可按同一 trace id 串联排查。
+
+### 数据可靠性与长连接
+
+- **会话原子写入**：会话 JSONL 与状态 / 标题索引均采用「临时文件 → `fsync` → `os.replace`」原子替换，
+  写入中断或磁盘写满时**保留原文件**，不会损坏已有会话历史。
+- **孤儿索引回收**：会话删除后，`_status` / `_titles` 中的残留条目会随下一次列表查询自动回收，
+  长时间运行不会内存与索引文件无界增长；运行中的会话不受影响。
+- **WebSocket 心跳保活**：`/api/chat` 空闲超过 **300 秒**（`WS_IDLE_TIMEOUT`）服务端会以
+  `close(1001)` 主动回收连接，避免对端异常断网导致的推理资源泄漏。客户端可周期性发送
+  `{"type":"ping"}` 刷新计时器（服务端回 `pong`）。
+- **响应压缩安全**：gzip 中间件对分块响应**整体缓冲后统一决策**，超过 8 MiB 的响应直接放弃压缩，
+  既避免内存放大，也不会出现「头声明 gzip 但首块未压缩」的损坏响应。
+
+### 日志治理
+
+安装脚本会自动配置日志容量上限，避免长期运行后磁盘被日志占满：
+
+| 平台 | 配置 | 效果 |
+|------|------|------|
+| Linux（systemd） | `/etc/systemd/journald.conf.d/99-aiassistant.conf` | `SystemMaxUse=500M`、保留 2 周 |
+| Linux（文件日志） | `/etc/logrotate.d/aiassistant` | 每日轮转、保留 14 份、`copytruncate` |
+| Windows | NSSM stdout/stderr → `logs\gateway.log` | 建议配合计划任务清理 |
+
+卸载时（`--uninstall` / `--purge`）上述配置会一并清理。手动调整方式：
+
+```bash
+sudo vi /etc/systemd/journald.conf.d/99-aiassistant.conf && sudo systemctl restart systemd-journald
+sudo vi /etc/logrotate.d/aiassistant && sudo logrotate -d /etc/logrotate.d/aiassistant
+```
 
 ## API 摘要
 

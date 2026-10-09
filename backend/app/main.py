@@ -42,7 +42,7 @@ async def lifespan(_app: FastAPI):
 def _create_app() -> FastAPI:
     app = FastAPI(
         title="AI Assistant Gateway",
-        version="1.2.0",
+        version="1.3.0",
         description=(
             "单机 AI 智能助手网关：多轮对话、视觉理解、上下文压缩、"
             "Skills / MCP / 自定义工具、会话管理与流式输出。"
@@ -140,19 +140,27 @@ def _mount_frontend(app: FastAPI) -> None:
     if assets.is_dir():
         app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
 
+    # 解析后的根目录：后续所有路径边界判断均以此为基准（resolve 可消除符号链接）
+    resolved_root = root.resolve()
+
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa_fallback(full_path: str):
         """静态文件优先，未命中回退 index.html（支撑 Vue Router history 模式）。"""
         if full_path.startswith(("api/", "ws")):
             return JSONResponse(status_code=404, content=error_body("接口不存在", ErrorCode.NOT_FOUND))
-        candidate = (root / full_path).resolve()
-        # 防路径穿越：仅允许 dist 目录内的文件
-        if (
-            full_path
-            and candidate.is_file()
-            and str(candidate).startswith(str(root.resolve()))
-        ):
-            return FileResponse(str(candidate))
+        # 防路径穿越：仅允许 dist 目录内的文件。
+        # 用 is_relative_to 做「路径分量级」判断，而非字符串前缀匹配——
+        # 后者会把同级兄弟目录（如 dist-secrets/）误判为在 dist 内。
+        if full_path:
+            try:
+                candidate = (root / full_path).resolve()
+                candidate.relative_to(resolved_root)
+            except (ValueError, OSError):
+                # 越界或非法路径：记录并回退到 index.html，不泄漏目录外内容
+                logger.warning("拒绝越界的静态路径请求: %s", full_path)
+                candidate = None
+            if candidate is not None and candidate.is_file():
+                return FileResponse(str(candidate))
         return FileResponse(str(index))
 
     logger.info("已挂载前端静态目录: %s", root)

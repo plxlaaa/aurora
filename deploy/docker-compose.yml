@@ -20,7 +20,7 @@ services:
       args:
         # 加速国内拉取基础镜像（可留空使用官方源）
         PYTHON_BASE: ${PYTHON_BASE:-python:3.11-slim}
-    image: aurora-gateway:${AURORA_VERSION:-1.1.0}
+    image: aurora-gateway:${AURORA_VERSION:-1.3.0}
     container_name: aurora-gateway
     restart: unless-stopped
     ports:

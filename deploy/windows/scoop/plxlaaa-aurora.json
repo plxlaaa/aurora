@@ -1,5 +1,5 @@
 {
-    "version": "1.2.0",
+    "version": "1.3.0",
     "description": "Aurora AI 智能助手——单机部署的浏览器 Web UI 智能助手（FastAPI + Vue3）",
     "homepage": "https://github.com/plxlaaa/aurora",
     "license": "MIT",

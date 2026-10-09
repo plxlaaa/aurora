@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 import threading
 import time
 import uuid
@@ -60,11 +61,8 @@ class SessionStore:
             self._save_status()
 
     def _save_status(self) -> None:
-        try:
-            with open(self._status_path, "w", encoding="utf-8") as fh:
-                json.dump(self._status, fh, ensure_ascii=False)
-        except Exception:
-            pass
+        """原子写状态表（临时文件 + replace），避免进程中断留下截断 JSON。"""
+        self._atomic_write_json(self._status_path, self._status)
 
     def _load_titles(self) -> None:
         if self._titles_path.exists():
@@ -75,11 +73,28 @@ class SessionStore:
                 self._titles = {}
 
     def _save_titles(self) -> None:
+        """原子写标题表（临时文件 + replace）。"""
+        self._atomic_write_json(self._titles_path, self._titles)
+
+    @staticmethod
+    def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+        """把字典原子写入 JSON 文件；失败仅记录日志，不向上抛出。
+
+        会话状态/标题属于辅助数据，写失败不应中断主流程（与既有行为保持一致）。
+        """
+        tmp_name = ""
         try:
-            with open(self._titles_path, "w", encoding="utf-8") as fh:
-                json.dump(self._titles, fh, ensure_ascii=False)
-        except Exception:
-            pass
+            fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False)
+            os.replace(tmp_name, str(path))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("写入 %s 失败: %s", path.name, exc)
+            if tmp_name and os.path.exists(tmp_name):
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
 
     def has_custom_title(self, session_id: str) -> bool:
         """用户是否已自定义标题（自动命名等插件据此决定是否介入）。"""
@@ -258,13 +273,29 @@ class SessionStore:
         return messages
 
     def _write_unlocked(self, session_id: str, messages: list[dict[str, Any]]) -> None:
-        """覆写会话文件（须持有锁）。"""
+        """覆写会话文件（须持有锁）。
+
+        采用「临时文件 + os.replace」原子替换：写入过程中崩溃不会留下截断的
+        JSONL（原实现直接覆写目标文件，中断即损坏整个会话历史）。
+        """
         path = self._path(session_id)
-        tmp = path.with_suffix(".jsonl.tmp")
-        with open(tmp, "w", encoding="utf-8") as fh:
-            for msg in messages:
-                fh.write(json.dumps(msg, ensure_ascii=False) + "\n")
-        tmp.replace(path)
+        # 临时文件与目标同目录，保证 os.replace 在同一文件系统上为原子操作
+        fd, tmp_name = tempfile.mkstemp(dir=str(self.data_dir), prefix=f".{path.stem}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                for msg in messages:
+                    fh.write(json.dumps(msg, ensure_ascii=False) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_name, path)
+        except Exception:
+            # 失败时清理临时文件，避免残留垃圾文件
+            if os.path.exists(tmp_name):
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+            raise
         self._cache_valid = False
 
     def load(self, session_id: str) -> list[dict[str, Any]]:
@@ -384,6 +415,17 @@ class SessionStore:
             for sid in set(self._session_cache) - set(live):
                 self._session_cache.pop(sid, None)
                 self._file_sigs.pop(sid, None)
+
+            # 顺带清理状态/标题表中的孤儿条目（会话文件已被外部删除的情况），
+            # 避免两张表随运行时间无界增长。仅在确有清理时落盘。
+            orphans = (set(self._status) | set(self._titles)) - set(live)
+            if orphans:
+                for sid in orphans:
+                    self._status.pop(sid, None)
+                    self._titles.pop(sid, None)
+                self._save_status()
+                self._save_titles()
+                logger.info("已清理 %d 个孤儿会话状态条目", len(orphans))
 
             for session_id, sig in live.items():
                 unchanged = (

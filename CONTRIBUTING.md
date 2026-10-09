@@ -55,8 +55,8 @@ cd frontend && npm run dev
 ### 代码检查与测试
 
 ```bash
-# 后端测试（254 项）
-cd backend && venv/bin/python -m unittest discover -s tests -v
+# 后端测试（321 项）
+cd backend && venv/bin/python -m pytest tests/ -q
 
 # 前端构建验证
 cd frontend && npm run build
@@ -165,8 +165,8 @@ if "enabled" not in payload:
 新增或修改业务逻辑时必须附带测试。测试放在 `backend/tests/`，命名 `test_<模块>.py`。
 
 ```bash
-cd backend && venv/bin/python -m unittest discover -s tests -v
-cd backend && venv/bin/python -m unittest tests.test_sessions_page  # 单文件
+cd backend && venv/bin/python -m pytest tests/ -q                # 全量
+cd backend && venv/bin/python -m pytest tests/test_static_mount.py -v   # 单文件
 ```
 
 覆盖要点：
@@ -180,6 +180,19 @@ cd backend && venv/bin/python -m unittest tests.test_sessions_page  # 单文件
 | 修复缺陷 | **先写能复现缺陷的测试**，确认它在修复前失败 |
 
 测试需使用 `tempfile` 创建隔离目录，**不得**写入真实 `/opt/aiassistant` 或仓库目录。
+
+### 测试文件职责划分
+
+| 文件 | 覆盖对象 |
+|------|---------|
+| `test_middleware_gzip.py` | `GZipMiddleware`：分块压缩、阈值、内存上限、流式跳过 |
+| `test_static_mount.py` | 前端静态托管与 SPA 回退，含**路径穿越**负向用例 |
+| `test_sessions_durability.py` | 会话原子写、失败保原文件、孤儿索引回收 |
+| `test_ws_and_login_guard.py` | WebSocket 心跳 / 空闲超时、登录失败表清理 |
+
+> **验证中间件类缺陷时的注意事项**：若中间件直接改写响应体（如 gzip），
+> `TestClient`（httpx）会自动解压响应，导致断言失真甚至误判通过。
+> 这类用例应在**原始 ASGI 层**驱动中间件，直接校验响应头与响应体字节的自洽性。
 
 ---
 
@@ -232,12 +245,12 @@ feat(middleware): 新增请求体限额与 gzip 中间件
 
 提交前确认清单：
 
-- [ ] `python -m unittest discover -s tests` 全部通过
+- [ ] `python -m pytest tests/ -q` 全部通过
 - [ ] `npm run build` 成功
 - [ ] 未将密钥、token、`*.local.yaml` 提交进仓库
 - [ ] 新增接口已在 `docs/API.md` 记录
 - [ ] 用户可见的行为变更已记入 `CHANGELOG.md`
-- [ ] 部署脚本通过语法检查（`bash -n deploy/install.sh`）
+- [ ] 部署脚本通过语法检查（`bash -n deploy/install.sh`；Windows 脚本用 PowerShell AST 解析器校验）
 
 ---
 

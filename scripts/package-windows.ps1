@@ -15,7 +15,7 @@
     便于上传到内网镜像仓库或GitHub Releases 后由各机器自行安装。
 
 .PARAMETER Version
-    版本号，默认读取 deploy\windows\winget 清单中的版本；缺省为 1.1.0。
+    版本号，默认读取 deploy\windows\winget 清单中的版本；缺省为 1.3.0。
 
 .PARAMETER Arch
     目标架构：x64（默认）或 arm64。
@@ -61,7 +61,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
         if ($match) { $Version = $match.Matches[0].Groups[1].Value }
     }
 }
-if ([string]::IsNullOrWhiteSpace($Version)) { $Version = "1.1.0" }
+if ([string]::IsNullOrWhiteSpace($Version)) { $Version = "1.3.0" }
 
 if ([string]::IsNullOrWhiteSpace($OutDir)) { $OutDir = Join-Path $RepoRoot "dist" }
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null

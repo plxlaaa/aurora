@@ -11,6 +11,7 @@
 #   sudo bash deploy/install.sh --no-start     # 安装但不启动服务
 #   sudo bash deploy/install.sh --with-firewall# 安装后配置防火墙放行端口
 #   sudo bash deploy/install.sh --check-upgrade# 仅检查是否有新版本（不改动）
+#   sudo bash deploy/install.sh --health-check # 仅做健康检查（含就绪探针）
 #   sudo bash deploy/install.sh --uninstall    # 卸载（保留数据）
 #   sudo bash deploy/install.sh --purge        # 卸载并删除全部数据
 #
@@ -22,7 +23,7 @@
 #   5. 同步 config（保留 *.local.yaml 密钥层）
 #   6. 构建前端（npm ci && npm run build）
 #   7. 安装 systemd 服务与密钥环境文件（/etc/aiassistant/gateway.env）
-#   8. 配置 nginx 模板并提示 HTTPS
+#   8. 配置日志轮转（logrotate）与 nginx 模板并提示 HTTPS
 #   9. 可选：防火墙放行（--with-firewall）与冒烟健康检查
 #
 # 幂等性：重复执行为「原地升级」，不会覆盖既有配置、会话与密钥。
@@ -35,6 +36,7 @@ TARGET="/opt/aiassistant"
 SERVICE_NAMES=(aiassistant-gateway vllm-main vllm-vision vllm-compress)
 GATEWAY_ENV_DIR="/etc/aiassistant"
 GATEWAY_ENV_FILE="${GATEWAY_ENV_DIR}/gateway.env"
+LOGROTATE_FILE="/etc/logrotate.d/aiassistant"
 
 # ---------- 参数解析 ----------
 SKIP_FRONTEND=0
@@ -43,21 +45,21 @@ DO_UNINSTALL=0
 PURGE=0
 WITH_FIREWALL=0
 CHECK_UPGRADE=0
+HEALTH_ONLY=0
 for arg in "$@"; do
   case "$arg" in
     --skip-frontend) SKIP_FRONTEND=1 ;;
     --with-firewall) WITH_FIREWALL=1 ;;
     --check-upgrade) CHECK_UPGRADE=1 ;;
+    --health-check)  HEALTH_ONLY=1 ;;
     --no-start)      DO_START=0 ;;
     --start)         DO_START=1 ;;
     --uninstall)     DO_UNINSTALL=1 ;;
     --purge)         PURGE=1 ;;
-    -h|--help)       sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help)       sed -n '2,32p' "$0"; exit 0 ;;
     *) echo "未知参数: $arg（--help 查看用法）" >&2; exit 2 ;;
   esac
 done
-# 默认不自动启动：模型端点需用户先配置，避免启动即失败
-DO_START=${DO_START}
 
 C_RED='\033[1;31m'; C_GREEN='\033[1;32m'; C_BLUE='\033[1;34m'; C_YELLOW='\033[1;33m'; C_OFF='\033[0m'
 log()  { printf "${C_BLUE}[install]${C_OFF} %s\n" "$*"; }
@@ -69,6 +71,50 @@ err()  { printf "${C_RED}[ERROR]${C_OFF}   %s\n" "$*"; }
 if [[ $EUID -ne 0 ]]; then
   err "请以 root 运行：sudo bash deploy/install.sh"
   exit 1
+fi
+
+# ---------- 端口读取（统一从密钥环境文件取，避免与实际监听不一致） ----------
+read_gateway_port() {
+  local port
+  port="$(grep -E '^AI_ASSISTANT_PORT=' "$GATEWAY_ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\r' || true)"
+  echo "${port:-8080}"
+}
+
+# ---------- 健康检查（存活 + 就绪） ----------
+# 等待服务真正就绪：systemctl start 返回后进程仍需数秒加载配置与探测端点，
+# 因此这里做带重试的轮询，而不是固定 sleep 后一次性判断。
+do_health_check() {
+  local port="$1" tries="${2:-15}" interval="${3:-2}"
+  if ! command -v curl >/dev/null 2>&1; then
+    warn "未安装 curl，跳过健康检查"
+    return 0
+  fi
+  log "---- 健康检查（最多等待 $((tries * interval))s）----"
+  local i
+  for ((i = 1; i <= tries; i++)); do
+    if curl -fsS --max-time 5 "http://127.0.0.1:${port}/api/health" >/dev/null 2>&1; then
+      ok "存活探针通过：http://127.0.0.1:${port}/api/health"
+      # 就绪探针：至少一个模型端点可用时 ready=true；
+      # 纯配置阶段（尚未启动模型服务）允许未就绪，仅作提示不判失败。
+      local ready_body
+      ready_body="$(curl -fsS --max-time 5 "http://127.0.0.1:${port}/api/ready" 2>/dev/null || true)"
+      if [[ -n "$ready_body" ]] && echo "$ready_body" | grep -q '"ready":true'; then
+        ok "就绪探针通过：模型端点已就绪"
+      else
+        warn "就绪探针未通过（尚无可用模型端点）。对话会失败，请检查 config/models.local.yaml 或先启动 vllm-* 服务。"
+      fi
+      return 0
+    fi
+    sleep "$interval"
+  done
+  warn "健康检查未通过（服务可能仍在启动或已崩溃），请查看：journalctl -u aiassistant-gateway -f"
+  return 1
+}
+
+# ---------- 仅健康检查模式 ----------
+if [[ $HEALTH_ONLY -eq 1 ]]; then
+  do_health_check "$(read_gateway_port)" || exit 1
+  exit 0
 fi
 
 # ---------- 仅检查版本（不改动物品） ----------
@@ -114,13 +160,20 @@ if [[ $DO_UNINSTALL -eq 1 ]]; then
   ok "nginx 配置已移除"
 
   # 清理防火墙放行规则（仅移除本脚本添加的 aurora 规则）
+  UNINSTALL_PORT="$(read_gateway_port)"
   if command -v ufw >/dev/null 2>&1; then
-    ufw --force delete allow "${GATEWAY_PORT_UMASK:-8080}/tcp" >/dev/null 2>&1 || true
+    ufw --force delete allow "${UNINSTALL_PORT}/tcp" >/dev/null 2>&1 || true
   fi
   if command -v firewall-cmd >/dev/null 2>&1; then
-    firewall-cmd --permanent --remove-port="${GATEWAY_PORT_UMASK:-8080}/tcp" >/dev/null 2>&1 || true
+    firewall-cmd --permanent --remove-port="${UNINSTALL_PORT}/tcp" >/dev/null 2>&1 || true
     firewall-cmd --reload >/dev/null 2>&1 || true
   fi
+
+  # 清理日志轮转与 journald 限额配置
+  rm -f "$LOGROTATE_FILE"
+  rm -f /etc/systemd/journald.conf.d/99-aiassistant.conf
+  systemctl restart systemd-journald 2>/dev/null || true
+  ok "日志轮转与 journald 限额配置已移除"
 
   if id aiassistant >/dev/null 2>&1; then
     userdel aiassistant 2>/dev/null || true
@@ -241,6 +294,47 @@ systemctl enable vllm-vision.service
 systemctl enable vllm-compress.service
 ok "systemd 服务已 enable"
 
+# ---------- 7b) 日志轮转 ----------
+# 网关日志由 journald 统一收集（journalctl -u aiassistant-gateway），此处额外配置
+# journald 的持久化容量上限，避免长期运行把系统盘写满导致服务不可用。
+log "---- 配置 journald 日志容量上限 ----"
+JOURNALD_CONF="/etc/systemd/journald.conf.d/99-aiassistant.conf"
+if [[ -d /etc/systemd/journald.conf.d ]]; then
+  mkdir -p /etc/systemd/journald.conf.d
+  cat > "$JOURNALD_CONF" <<'EOF'
+# 由 deploy/install.sh 生成：限制系统日志占用上限，防止磁盘被日志写满
+[Journal]
+SystemMaxUse=500M
+# 保留两周历史；超出后按时间回收
+MaxRetentionSec=2week
+EOF
+  systemctl restart systemd-journald 2>/dev/null || true
+  ok "journald 上限已配置（SystemMaxUse=500M / 保留 2 周）：$JOURNALD_CONF"
+else
+  warn "未找到 /etc/systemd/journald.conf.d，跳过 journald 容量限制"
+fi
+
+# 应用自身可能产生的文件日志（如离线包模式下的 logs/）单独轮转
+if [[ -d "$TARGET/logs" ]]; then
+  cat > "$LOGROTATE_FILE" <<EOF
+# 由 deploy/install.sh 生成：Aurora 应用文件日志轮转
+$TARGET/logs/*.log {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    su aiassistant aiassistant
+    create 0640 aiassistant aiassistant
+}
+EOF
+  ok "文件日志轮转已配置：$LOGROTATE_FILE（保留 14 天）"
+else
+  warn "未找到 $TARGET/logs，跳过文件日志轮转配置"
+fi
+
 # ---------- 8) nginx ----------
 log "---- nginx 配置提示 ----"
 if command -v nginx >/dev/null 2>&1; then
@@ -255,8 +349,7 @@ fi
 # ---------- 9) 防火墙（可选） ----------
 if [[ $WITH_FIREWALL -eq 1 ]]; then
   log "---- 配置防火墙 ----"
-  GATEWAY_PORT="$(grep -E '^AI_ASSISTANT_PORT=' "$GATEWAY_ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2)"
-  GATEWAY_PORT="${GATEWAY_PORT:-8080}"
+  GATEWAY_PORT="$(read_gateway_port)"
   if command -v ufw >/dev/null 2>&1; then
     ufw allow "${GATEWAY_PORT}/tcp" comment "Aurora gateway" >/dev/null 2>&1 \
       && ok "ufw 已放行 TCP ${GATEWAY_PORT}" \
@@ -275,17 +368,10 @@ else
 fi
 
 # ---------- 10) 冒烟健康检查 ----------
-# 端口统一从密钥环境文件读取，避免与实际监听端口不一致导致误报
-HEALTH_PORT="$(grep -E '^AI_ASSISTANT_PORT=' "$GATEWAY_ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2)"
-HEALTH_PORT="${HEALTH_PORT:-8080}"
-if [[ $DO_START -eq 1 ]] && command -v curl >/dev/null 2>&1; then
-  log "---- 健康检查 ----"
-  sleep 2
-  if curl -fsS --max-time 5 "http://127.0.0.1:${HEALTH_PORT}/api/health" >/dev/null 2>&1; then
-    ok "健康检查通过：http://127.0.0.1:${HEALTH_PORT}/api/health"
-  else
-    warn "健康检查未通过（服务可能仍在启动），请查看：journalctl -u aiassistant-gateway -f"
-  fi
+HEALTH_PORT="$(read_gateway_port)"
+if [[ $DO_START -eq 1 ]]; then
+  systemctl restart aiassistant-gateway
+  do_health_check "$HEALTH_PORT"
 fi
 
 ok "======================================================"
@@ -298,4 +384,5 @@ ok " 4. 验证：curl http://127.0.0.1:8080/api/health"
 ok " 5. 查看日志：journalctl -u aiassistant-gateway -f"
 ok " 6. HTTPS（可选）：sudo certbot --nginx -d 你的域名"
 ok " 7. 检查升级：sudo bash deploy/install.sh --check-upgrade"
+ok " 8. 健康检查：sudo bash deploy/install.sh --health-check"
 ok "======================================================"

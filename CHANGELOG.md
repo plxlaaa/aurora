@@ -2,6 +2,49 @@
 
 本文件记录 Aurora AI 智能助手的版本变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.3.0] — 2026-10-09
+
+修复 gzip 多块响应体损坏与静态托管路径穿越两个真实生产缺陷，强化会话持久化 durability 与长连接健壮性，Linux / Windows 安装脚本的健康检查与日志治理能力补齐。
+
+### 缺陷修复
+
+- **gzip 多块响应体损坏（影响所有分块响应）**：`GZipMiddleware` 原实现只在 `not more_body and len(body) >= min_size` 时压缩**最后一个**分块，却已在响应头声明 `Content-Encoding: gzip`。由于该头一旦发出即代表**整个响应体**都是 gzip 流，未压缩的前序分块与被压缩的末块拼接后成为非法 gzip 序列，客户端必然解码失败（`incorrect header check` / `Not a gzipped file`）。实测前端 40KB 级静态资源（`FileResponse` 分块输出）100% 触发。现改为**整体缓冲后统一决策**：先累积全部分块，再根据总量与 `min_size` 决定整体压缩或原样发出；压缩时同步重算 `Content-Length` 并剔除失效的 `content-encoding`，未压缩路径下响应体与头部严格自洽。
+- **超大响应内存放大**：整体缓冲策略若无上限会把大文件整个读进内存。现引入 `MAX_BUFFER_BYTES = 8 MiB` 阈值，超过即**放弃压缩**并原样flush 已缓冲分块（不丢数据），既避免内存放大也避免对已压缩内容二次压缩。
+- **静态托管路径穿越（安全漏洞）**：SPA 深链回退原先用 `str(candidate).startswith(str(root.resolve()))` 做前缀匹配，而字符串前缀无法区分路径分量边界——请求 `/..%2Fdist-secrets%2Fsecret.txt` 会把同级兄弟目录 `dist-secrets/` 误判为在 `dist` 内并**返回其文件内容（200）**。现改用 `Path.relative_to()` 做分量级判定，越界请求记warning 并回退到 `index.html`；`api/`、`ws` 前缀仍直接返回 404 JSON。
+
+### 后端增强
+
+- **会话持久化原子写**（`app/services/sessions.py`）：`_write_unlocked` 原先直接覆写目标 `.jsonl`，进程崩溃 / 磁盘写满时会使整个会话历史损坏。现改为「`mkstemp` 临时文件 → `write` → `fsync` → `os.replace`」原子替换（同目录保证同一文件系统），失败时清理临时文件并保留原文件不动。状态 / 标题索引表同样改用原子写，且写失败仅记warning 不再向上抛出，避免一次磁盘抖动导致整个请求 500。
+- **孤儿会话状态回收**：`SessionStore` 的 `_status` / `_titles` 只增不减，会话删除后残留条目永久堆积。新增 `_get_cached_session_list` 孤儿清理：以实际存活的会话 id 为基准做差集，回收并持久化，避免长时间运行后内存与索引文件无界增长；运行中的会话不会被误清理。
+- **WebSocket 心跳保活**（`app/routers/api.py`）：`/api/chat` 原先阻塞在 `receive_json()` 上，对端异常断开（网络中断、客户端进程被杀）时服务端无法感知，连接与推理资源泄漏。新增 `WS_IDLE_TIMEOUT = 300s` 空闲超时，超时以 `close(1001)` 主动回收；正常客户端的 `ping` 同样会刷新计时器。
+- **登录失败表定期清理**：按 IP 限流表只增不减，攻击者轮换来源 IP 会导致无界增长。新增 `_sweep_login_failures()` 以 60 秒为周期（限频，避免每请求都扫全表）清理超出锁定窗口的失败记录。
+- **健康 / 就绪探针分离复核**：`/api/health` 保持轻量存活语义，`/api/ready` 返回端点、 MCP、插件、鉴权等就绪详情，安装脚本的健康检查优先探测 `ok`，并附带就绪探针二次确认。
+
+### 测试
+
+- 新增 `tests/test_middleware_gzip.py`（22 项 + 4 subtests）：**在原始 ASGI 层驱动中间件**（绕过 httpx 自动解压，直接校验响应头与响应体字节的自洽性），覆盖多块压缩可解压、首块极小、阈值边界、自定义 `min_size`、流式类型跳过、HTTP 500、已带 `content-encoding` 的透传、`Content-Length` 预判、`vary` 头、超大响应内存保护、空 body、异常中断、非 http scope 放行。
+- 新增 `tests/test_static_mount.py`（17 项 + 2 subtests）：目录内资源正常服务、SPA 深链回退、`api/` 与 `ws` 前缀 404、**兄弟目录前缀绕过**、URL 编码 / 双编码 / 四点 / 反斜杠穿越、拒绝时回退index。
+- 新增 `tests/test_sessions_durability.py`（13 项）：原子写无临时文件残留、写入失败保留原内容、状态 / 标题表容错、孤儿条目清理、运行中会话不被误清理。
+- 新增 `tests/test_ws_and_login_guard.py`（12 项）：`ping`/`pong`、欢迎语、`switch_model`/`set_thinking` 确认、空消息拒绝、空闲超时结构性校验；登录失败表过期移除、近期保留、清理限频、空表安全、guard 触发。
+- 测试总数 **256 → 321 项**（+65），全部通过。
+- **回归有效性验证**：临时将实现还原为缺陷版本后复跑——gzip 测试 13 项失败、路径穿越测试 4 项失败，确认新增用例确实覆盖缺陷而非空转。
+
+### 部署与安装
+
+- **Linux 健康检查**（`deploy/install.sh`）：新增 `--health-check` 参数与带重试轮询的健康 / 就绪探针（`read_gateway_port()` 统一读取端口，修复原脚本 `GATEWAY_PORT_UMASK` 未定义变量），避免服务刚启动时的单次探测误判失败；移除无意义的 `DO_START=${DO_START}`。
+- **Linux 日志治理**：安装时写入 `/etc/systemd/journald.conf.d/99-aiassistant.conf`（`SystemMaxUse=500M`、`MaxRetentionSec=2week`）限制 journald 磁盘占用，并生成 `/etc/logrotate.d/aiassistant`（`daily` / `rotate 14` / `copytruncate`）；卸载时同步清理这两份配置。
+- **Windows 健康检查**（`deploy/windows/install.ps1`）：新增 `-HealthRetries`（默认 10次 × 2 秒 ≈ 20s）带重试轮询 + 就绪探针；修复原实现引用**不存在字段** `$health.content` 的缺陷（改为输出 `ok` / `ready` / `version`）。
+- **Windows 防火墙语义修正**：原先按「端口是否等于 8080」判断是否放行，且引用了**未定义参数** `-PublicPort`。现改为显式 `-PublicPort`（`0` 表示不暴露，默认仅监听 `127.0.0.1` 不创建规则），并修正 `param()` 块补齐该参数定义；对外暴露时提示优先走 IIS / nginx 反代。
+- **双端脚本语法校验**：`bash -n deploy/install.sh` 与 PowerShell AST 解析器（`Parser::ParseFile`）双双通过，并静态扫描确认无未定义变量引用。
+
+### 文档
+
+- `README.md`：功能表新增「数据可靠性」条目；目录结构补充 4 个新增测试文件与部署脚本能力；环境变量表补充日志治理相关说明；测试数 256 → 321；新增「数据可靠性与长连接」小节（原子写、孤儿回收、WS 空闲回收）。
+- `INSTALL.md`：Linux 章节补充 `--health-check` 与 journald / logrotate 日志治理说明；Windows 章节补充 `-HealthRetries` 与 `-PublicPort` 的语义与用法；排错章节补充「安装脚本健康检查失败如何排查」。
+- `docs/API.md`：版本标注更新至 1.3.0，WebSocket 章节补充**空闲超时（300s）与 `close(1001)`** 的协议说明与客户端心跳建议。
+- `CONTRIBUTING.md`：补充新增测试文件的职责划分与本地验证命令。
+- 版本号统一提升至 **1.3.0**（`app/main.py`、`routers/deps.py`、winget / scoop 清单、docker-compose 默认镜像标签同步）。
+
 ## [1.2.0] — 2026-10-07
 
 修复「死配置」与gzip 阈值缺陷，新增结构化日志与离线分发能力，Linux / Windows 安装部署再增强。

@@ -1,6 +1,6 @@
 # API 参考
 
-Aurora 网关 HTTP / WebSocket 接口参考，覆盖 1.1.0 版本。
+Aurora 网关 HTTP / WebSocket 接口参考，覆盖 1.3.0 版本。
 
 - 基础信息：[服务信息](#服务信息) · [鉴权](#鉴权) · [错误格式](#错误格式) · [错误码](#错误码表)
 - 接口：[健康检查](#健康与就绪) · [模型](#模型配置) · [沙箱](#沙箱) · [工具](#工具中心) · [Skills](#skills) · [MCP](#mcp-管理) · [文件](#文件) · [会话](#会话) · [统计](#统计) · [对话](#对话websocket)
@@ -15,7 +15,7 @@ Aurora 网关 HTTP / WebSocket 接口参考，覆盖 1.1.0 版本。
 | 项 | 值 |
 |----|-----|
 | 网关标题 | AI Assistant Gateway |
-| 版本 | 1.1.0 |
+| 版本 | 1.3.0 |
 | 协议 | HTTP/1.1（WebSocket 走 `/api/chat`） |
 | 编码 | UTF-8 |
 | 数据格式 | JSON（文件下载除外） |
@@ -122,7 +122,7 @@ ws://host/api/chat?session_id=<id>&token=<api_key|JWT>
   "status": "healthy",
   "ready": true,
   "mode": "sandbox",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "endpoints_available": ["main"],
   "endpoints_total": 3,
   "uptime_hint": "see /api/stats"
@@ -143,7 +143,7 @@ ws://host/api/chat?session_id=<id>&token=<api_key|JWT>
   "auth_enabled": true,
   "sandbox_mode": "sandbox",
   "plugins": ["auto_title", "stats"],
-  "version": "1.1.0"
+  "version": "1.3.0"
 }
 ```
 
@@ -425,6 +425,17 @@ ws://host/api/chat?session_id=<id>&token=<api_key|JWT>
 网关全局限制并发生成数（默认 3，`AI_ASSISTANT_MAX_CONCURRENT_GENERATIONS`）。槽位占满时返回 `{"type":"error","message":"系统生成任务已达上限，请稍后再试"}`。
 
 同一连接在上一轮未结束时收到 `message` 会返回 `{"type":"error","message":"上一轮生成尚未结束"}`。
+
+### 空闲超时与心跳
+
+服务端对每条 WebSocket 连接设置 **300 秒空闲超时**（`WS_IDLE_TIMEOUT`，1.3.0 起）：
+
+- 连接空闲（未收到任何客户端消息）满 300 秒后，服务端以 **`close(1001)`**（going away）主动关闭连接；
+- 客户端发送 `ping`、或任意业务消息都会刷新计时器，服务端回 `pong`；
+- 该机制用于回收对端异常断网 / 进程被杀时残留的连接与推理资源，避免服务端资源泄漏。
+
+客户端建议在无消息时每 **30～60 秒**发送一次 `{"type":"ping"}`。若经过反向代理，`proxy_read_timeout`
+需大于 300 秒（仓库 `deploy/nginx.conf` 模板已按3600s 配置）。
 
 ### 执行代码
 

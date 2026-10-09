@@ -87,5 +87,5 @@ def readiness() -> dict:
         "auth_enabled": auth.auth_enabled(),
         "sandbox_mode": settings.sandbox_mode(),
         "plugins": sorted(plugins),
-        "version": "1.2.0",
+        "version": "1.3.0",
     }

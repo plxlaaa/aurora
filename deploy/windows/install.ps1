@@ -28,11 +28,19 @@
 .PARAMETER RegisterService
     注册为 Windows 服务（开机自启、崩溃自动重启）。
 
+.PARAMETER PublicPort
+    对外暴露端口。默认留空——网关只监听 127.0.0.1，外部流量应经 IIS / nginx 反代进入。
+    仅在确实需要直接对外提供 HTTP 服务时指定此参数（会自动放行防火墙）。
+
 .PARAMETER ServiceUser
     服务运行账户。默认 LocalSystem；如需低权限账号可指定域\用户名。
 
 .PARAMETER SkipFrontend
     跳过前端构建（已有 dist 产物或仅调后端时使用）。
+
+.PARAMETER HealthRetries
+    安装后的健康检查重试次数（默认 10 次，每次间隔 2 秒，共约 20s）。
+    服务注册后需数秒加载配置与探测模型端点，一次探测易误判失败。
 
 .PARAMETER Uninstall
     卸载模式：停止并删除服务（保留数据目录，除非加 -PurgeData）。
@@ -42,7 +50,7 @@
 
 .EXAMPLE
     # 基础安装（自动生成 API Key，注册 Windows 服务）
-    powershell -ExecutionPolicy Bypass -File deploy\windows\install.ps1
+    powershell -ExecutionPolicy Bypass -File deploy\windows\install.ps1 -RegisterService
 
 .EXAMPLE
     # 自定义端口与密钥，注册为低权限服务账户
@@ -64,8 +72,12 @@ param(
     [int]$Port = 8080,
     [string]$ApiKey = "",
     [switch]$RegisterService,
+    [ValidateRange(0, 65535)]
+    [int]$PublicPort = 0,
     [string]$ServiceUser = "LocalSystem",
     [switch]$SkipFrontend,
+    [ValidateRange(1, 60)]
+    [int]$HealthRetries = 10,
     [switch]$Uninstall,
     [switch]$PurgeData
 )
@@ -310,14 +322,17 @@ try {
 Write-Step "配置 Windows 防火墙"
 try {
     $ruleName = "$ServiceName-In TCP"
-    if ($Port -eq 8080) {
-        # 仅本机访问无需放行防火墙；对外暴露时才添加规则
-        Write-Ok "默认仅监听 127.0.0.1，无需防火墙规则（如需远程访问请用 -PublicPort 并手动放行）"
-    } else {
-        Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+    # 网关默认仅监听 127.0.0.1（见下方 gateway.env /服务启动参数），
+    # 外部无法直连，因此不需要任何入站放行规则。
+    # 仅当显式要求对外暴露时才创建规则。
+    if ($PublicPort) {
+        Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue |
+            Remove-NetFirewallRule -ErrorAction SilentlyContinue
         New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow `
-            -Protocol TCP -LocalPort $Port -Profile Any | Out-Null
-        Write-Ok "已放行入站 TCP $Port"
+            -Protocol TCP -LocalPort $PublicPort -Profile Any | Out-Null
+        Write-Ok "已放行入站 TCP $PublicPort（对外暴露模式，建议改用 IIS/nginx 反代）"
+    } else {
+        Write-Ok "默认仅监听 127.0.0.1，未添加防火墙规则（需远程访问请加 -PublicPort <端口>）"
     }
 } catch { Write-Warn "配置防火墙失败（可能需要管理员确认）：$($_.Exception.Message)" }
 
@@ -389,17 +404,42 @@ if ($RegisterService) {
 }
 
 # ---------- 冒烟验证 ----------
-Write-Step "验证网关可访问"
+# 服务注册后需数秒加载配置并探测模型端点，故做带重试的轮询而非一次性探测，
+# 避免把「仍在启动」误判为安装失败。
+Write-Step "验证网关可访问（最多重试 $HealthRetries 次）"
 $ok = $false
-try {
-    $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/health" -UseBasicParsing -TimeoutSec 15
-    if ($resp.StatusCode -eq 200) {
-        $health = $resp.Content | ConvertFrom-Json
-        Write-Ok "健康检查通过：$($health.content | Out-String)".Trim()
-        $ok = $true
+for ($i = 1; $i -le $HealthRetries; $i++) {
+    try {
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/health" -UseBasicParsing -TimeoutSec 5
+        if ($resp.StatusCode -eq 200) {
+            $health = $resp.Content | ConvertFrom-Json
+            Write-Ok "健康检查通过（第 $i 次）：ok=$($health.ok) ready=$($health.ready) version=$($health.version)"
+            $ok = $true
+            break
+        }
+    } catch {
+        if ($i -eq $HealthRetries) {
+            Write-Warn "健康检查未通过：$($_.Exception.Message)"
+        } else {
+            Write-Host "  ... 等待服务就绪（$i/$HealthRetries）" -ForegroundColor DarkGray
+        }
+        Start-Sleep -Seconds 2
     }
-} catch {
-    Write-Warn "健康检查未通过（服务可能仍在启动）：$($_.Exception.Message)"
+}
+
+# 就绪探针：至少一个模型端点可用时 ready=true。
+# 未配置模型端点属于正常初始状态，仅提示不判失败。
+if ($ok) {
+    try {
+        $ready = (Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/ready" -UseBasicParsing -TimeoutSec 5).Content | ConvertFrom-Json
+        if ($ready.ready) {
+            Write-Ok "就绪探针通过：可用端点 $($ready.endpoints_available -join ', ')"
+        } else {
+            Write-Warn "就绪探针未通过（尚无可用模型端点）。对话将失败，请编辑 $InstallDir\config\models.local.yaml 填入 base_url / api_key。"
+        }
+    } catch {
+        Write-Warn "就绪探针请求失败：$($_.Exception.Message)"
+    }
 }
 
 Write-Host ""
