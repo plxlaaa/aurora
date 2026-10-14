@@ -918,6 +918,11 @@ async def chat(ws: WebSocket) -> None:
         async with _generation_slots:
             return await generate(*args, **kwargs)
 
+    def _log_task_failure(task: asyncio.Task) -> None:
+        """生成后台任务异常兜底日志：没人 await 的 Task 异常默认被吞。"""
+        if not task.cancelled() and task.exception():
+            logger.error("生成任务异常终止: %s", task.exception(), exc_info=task.exception())
+
     def busy() -> bool:
         return current_task is not None and not current_task.done()
 
@@ -1011,8 +1016,10 @@ async def chat(ws: WebSocket) -> None:
                     await ws.send_json({"type": "error", "message": "系统生成任务已达上限，请稍后再试"})
                     continue
                 current_task = asyncio.create_task(
-                    _guarded_generate(history, False, cancel_event)
+                    _guarded_generate(history, resolved, False, cancel_event)
                 )
+                # 生成任务异常不许静默：参数错位/上游异常都要留下日志
+                current_task.add_done_callback(_log_task_failure)
                 continue
 
             content = msg.get("content", "")
@@ -1039,6 +1046,7 @@ async def chat(ws: WebSocket) -> None:
             current_task = asyncio.create_task(
                 _guarded_generate(history, resolved, bool(msg.get("force_compress", False)), cancel_event)
             )
+            current_task.add_done_callback(_log_task_failure)
     except WebSocketDisconnect:
         logger.info("客户端断开连接")
     except Exception as exc:  # noqa: BLE001

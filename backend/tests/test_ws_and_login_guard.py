@@ -133,5 +133,52 @@ class TestLoginFailureSweep(unittest.TestCase):
         self.assertNotIn("5.5.5.5", api_module._login_failures)
 
 
+class TestRegenerateE2E(unittest.TestCase):
+    """regenerate 端到端：曾因 create_task 参数错位（丢 resolved）静默失效。
+
+    TypeError 在后台 Task 里被 asyncio 吞掉，前端表现为点了没反应。
+    用 mock pipeline 的 run_full 断言 regenerate 确实触发了新一轮生成。
+    """
+
+    def test_regenerate_triggers_generation(self):
+        with TestClient(app) as client:
+            with client.websocket_connect("/api/chat?session_id=wstest-regen") as ws:
+                from app.routers import deps as deps_mod
+
+                ws.send_json({"type": "message", "content": "hi"})
+                # 等首轮完成（生成会失败——上游不可达，但会话已落盘 user 消息）
+                deadline_seen = False
+                for _ in range(20):
+                    msg = ws.receive_json()
+                    if msg.get("type") in ("done", "error"):
+                        deadline_seen = True
+                        break
+                self.assertTrue(deadline_seen)
+
+                calls = []
+                orig = deps_mod.pipeline.run_full
+
+                async def spy_run_full(history, resolved, sink, **k):
+                    calls.append([dict(m) for m in history])
+                    # 模拟一轮成功生成：发 delta + done（真 run_full 内部也是经 sink 发）
+                    await sink({"type": "delta", "text": "mock-regen"})
+                    await sink({"type": "done"})
+                    return None
+
+                with mock.patch.object(deps_mod.pipeline, "run_full", spy_run_full):
+                    ws.send_json({"type": "regenerate"})
+                    finished = False
+                    for _ in range(20):
+                        msg = ws.receive_json()
+                        if msg.get("type") in ("done", "error"):
+                            finished = True
+                            break
+                # 没触发生成（参数错位时 Task 静默死掉，连接上什么都不发）
+                self.assertTrue(finished, "regenerate 未产生任何响应帧（疑似生成任务静默失败）")
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0][-1]["role"], "user")
+                self.assertEqual(calls[0][-1]["content"], "hi")
+
+
 if __name__ == "__main__":
     unittest.main()

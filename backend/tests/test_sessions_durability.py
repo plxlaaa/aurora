@@ -182,5 +182,46 @@ class TestOrphanCleanup(unittest.TestCase):
         self.assertEqual(store.get_status(sid), SessionStore.STATUS_RUNNING)
 
 
+class TestLoadCache(unittest.TestCase):
+    """内容读缓存：sig 命中零读盘、文件变化即失效、返回浅拷贝防污染。"""
+
+    def test_cache_hit_and_invalidate(self):
+        store, _ = new_store()
+        sid = store.create()
+        store.append(sid, {"role": "user", "content": "hi"})
+        first = store.load(sid)
+        # 命中：修改缓存内部列表不应影响后续 load（浅拷贝防御）
+        first.append({"role": "user", "content": "polluted"})
+        second = store.load(sid)
+        self.assertEqual(len(second), 1)
+
+    def test_cache_invalidated_by_write(self):
+        store, _ = new_store()
+        sid = store.create()
+        store.append(sid, {"role": "user", "content": "a"})
+        self.assertEqual(len(store.load(sid)), 1)
+        store.append(sid, {"role": "assistant", "content": "b"})
+        # append 后 sig 变化，load 必须看到新消息
+        self.assertEqual(len(store.load(sid)), 2)
+
+    def test_cache_invalidated_by_save(self):
+        store, _ = new_store()
+        sid = store.create()
+        store.append(sid, {"role": "user", "content": "a"})
+        history = store.load(sid)
+        del history[:]
+        store.save(sid, history)
+        self.assertEqual(store.load(sid), [])
+
+    def test_cache_no_leak_after_delete(self):
+        store, _ = new_store()
+        sid = store.create()
+        store.append(sid, {"role": "user", "content": "a"})
+        store.load(sid)
+        store.delete(sid)
+        self.assertNotIn(sid, store._load_cache)
+        self.assertEqual(store.load(sid), [])
+
+
 if __name__ == "__main__":
     unittest.main()

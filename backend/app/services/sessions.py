@@ -45,6 +45,11 @@ class SessionStore:
         self._file_sigs: dict[str, tuple[int, int]] = {}
         # 标题表签名：改名会影响列表展示，改名时整体重建
         self._titles_sig: tuple = ()
+        # 会话内容读缓存：{session_id: (sig, messages)}。
+        # 每条 WS 消息会触发 collapse_deltas + load 两次全量读盘，
+        # 长会话下 jsonl 全量解析是事件循环热点；sig 命中直接返回缓存，
+        # stat 便宜且文件一变即失效，不存在读到旧数据的风险。
+        self._load_cache: dict[str, tuple[tuple[int, int], list[dict[str, Any]]]] = {}
 
     def _load_status(self) -> None:
         if self._status_path.exists():
@@ -254,12 +259,23 @@ class SessionStore:
             self._cache_valid = False
 
     def _load_unlocked(self, session_id: str) -> list[dict[str, Any]]:
-        """读取会话文件（须持有锁；不触发 pending 合并，纯文件内容）。"""
+        """读取会话文件（须持有锁；不触发 pending 合并，纯文件内容）。
+
+        sig 缓存命中时返回列表浅拷贝：调用方常对返回值做顶层增删
+        （如 regenerate 裁剪后再 save），共享元素则不做防御——
+        对消息元素的原地修改并不存在于任何调用路径。
+        """
         if not self._safe_name(session_id):
             return []
         path = self._path(session_id)
-        if not path.exists():
+        try:
+            sig = (path.stat().st_mtime_ns, path.stat().st_size)
+        except OSError:
+            self._load_cache.pop(session_id, None)
             return []
+        cached = self._load_cache.get(session_id)
+        if cached and cached[0] == sig:
+            return list(cached[1])
         messages: list[dict[str, Any]] = []
         with open(path, encoding="utf-8") as fh:
             for line in fh:
@@ -270,7 +286,8 @@ class SessionStore:
                     messages.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue
-        return messages
+        self._load_cache[session_id] = (sig, messages)
+        return list(messages)
 
     def _write_unlocked(self, session_id: str, messages: list[dict[str, Any]]) -> None:
         """覆写会话文件（须持有锁）。
@@ -319,6 +336,7 @@ class SessionStore:
             existed = path.exists()
             if existed:
                 path.unlink()
+            self._load_cache.pop(session_id, None)
             self._status.pop(path.stem, None)
             self._titles.pop(path.stem, None)
             self._save_status()
@@ -342,6 +360,7 @@ class SessionStore:
             archive_dir.mkdir(exist_ok=True)
             dest = archive_dir / path.name
             path.replace(dest)
+            self._load_cache.pop(session_id, None)
             self._status.pop(path.stem, None)
             self._save_status()
             self._cache_valid = False

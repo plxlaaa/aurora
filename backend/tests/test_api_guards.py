@@ -10,6 +10,9 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # 导入 api 路由会实例化会话存储，重定向到临时目录（沙箱无 /opt 权限）
 os.environ.setdefault("AI_ASSISTANT_DATA_DIR", tempfile.mkdtemp(prefix="aurora-test-"))
+# 必须同时重定向配置目录：本模块字母序最先导入 app，否则全局 Settings
+# 落到 /opt/aiassistant/config，后续所有写配置的用例（如 update_sandbox）会 500
+os.environ.setdefault("AI_ASSISTANT_CONFIG_DIR", tempfile.mkdtemp(prefix="aurora-test-cfg-"))
 
 from fastapi import HTTPException  # noqa: E402
 
