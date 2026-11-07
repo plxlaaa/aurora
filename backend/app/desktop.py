@@ -145,6 +145,12 @@ def _selfcheck() -> int:
     def _pywin32_check() -> str:
         if os.name != "nt":
             raise RuntimeError("非 Windows")
+        sp = Path(sys.path and next(
+            p for p in sys.path if "site-packages" in Path(p).as_posix()))
+        hits = sorted({str(p.relative_to(sp)) for p in sp.rglob("pywintypes*")})
+        print(f"  pywintypes 文件: {hits or '无!'}", flush=True)
+        if not hits:
+            raise RuntimeError("site-packages 中无 pywintypes* 文件")
         importlib.import_module("pywintypes")
         return "pywintypes 可用"
 
