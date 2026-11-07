@@ -45,6 +45,9 @@ jobs:
           Copy-Item installer/windows/aurora.bat, installer/windows/aurora-web.bat, installer/windows/aurora-stop.bat, installer/windows/start-aurora.ps1, installer/windows/README.txt stage/
           Invoke-WebRequest $env:PYTHON_EMBED_URL -OutFile py-embed.zip
           Expand-Archive py-embed.zip -DestinationPath stage/runtime
+          # embeddable python 的 ._pth 隔离模式会忽略 PYTHONPATH——
+          # 必须把 site-packages 与 backend 写进 ._pth（路径相对 runtime 目录）
+          Add-Content stage/runtime/python311._pth "`n..\backend`n..\backend\site-packages`nimport site"
           python -m pip install -r backend/requirements.txt --target stage/backend/site-packages --quiet
           python -m pip install -r backend/requirements-desktop.txt --target stage/backend/site-packages --quiet
           Get-ChildItem stage | Select-Object Name

@@ -23,7 +23,7 @@
 set -euo pipefail
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="1.6.0"
+VERSION="1.6.1"
 WITH_VENV=0
 WITH_FRONTEND=0
 OUTDIR="$SRC_DIR/dist"

@@ -6,7 +6,7 @@
 ; 版本：优先取环境变量 APP_VERSION（CI 由 tag 推导，无 v 前缀），缺省 1.6.0
 #define AppVersion GetEnv("APP_VERSION")
 #ifndef AppVersion
-  #define AppVersion "1.6.0"
+  #define AppVersion "1.6.1"
 #endif
 
 #define RepoRoot GetEnv("GITHUB_WORKSPACE")
@@ -44,14 +44,16 @@ Source: "{#RepoRoot}\stage\*"; DestDir: "{app}"; Flags: recursesubdirs createall
 Name: "{app}\data"
 
 [Icons]
-Name: "{group}\Aurora"; Filename: "{app}\aurora.bat"; Comment: "Aurora AI 助手（桌面窗口）"
+; 主入口直指 pythonw（无控制台黑框）；排障用 aurora.bat
+Name: "{group}\Aurora"; Filename: "{app}\runtime\pythonw.exe"; Parameters: "-m app.desktop"; WorkingDir: "{app}\backend"; Comment: "Aurora AI 助手（桌面窗口）"
 Name: "{group}\Aurora（浏览器模式）"; Filename: "{app}\aurora-web.bat"; Comment: "浏览器访问 http://127.0.0.1:8080"
+Name: "{group}\Aurora（排障控制台）"; Filename: "{app}\aurora.bat"; Comment: "带控制台输出启动，用于排查启动问题"
 Name: "{group}\停止 Aurora"; Filename: "{app}\aurora-stop.bat"; Comment: "停止本地 Aurora 进程"
 Name: "{group}\卸载 Aurora"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Aurora"; Filename: "{app}\aurora.bat"; Tasks: desktopicon
+Name: "{autodesktop}\Aurora"; Filename: "{app}\runtime\pythonw.exe"; Parameters: "-m app.desktop"; WorkingDir: "{app}\backend"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\aurora.bat"; Description: "立即启动 Aurora"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\runtime\pythonw.exe"; Parameters: "-m app.desktop"; WorkingDir: "{app}\backend"; Description: "立即启动 Aurora"; Flags: nowait postinstall skipifsilent
 
 [Code]
 // 卸载流程：确认卸载 → 停进程 → 询问是否保留用户数据（默认保留）

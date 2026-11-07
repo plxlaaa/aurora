@@ -2,6 +2,25 @@
 
 本文件记录 Aurora AI 智能助手的版本变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.6.1] — 2026-11-08
+
+修复 Windows 安装版启动即崩（黑框一闪而过）：embeddable Python 的 `._pth` 隔离模式会**忽略 PYTHONPATH**，导致 site-packages 不可见、依赖导入失败且无任何报错。
+
+### 修复
+
+- **_pth 修复**（根因）：构建时向 `runtime/python311._pth` 注入 `..\backend`、`..\backend\site-packages` 与 `import site`——embeddable Python 从此能看见依赖与环境（v1.5.0 起的隐雷，Windows 版所有启动方式均受影响）；
+- **快捷方式不再弹黑框**：开始菜单/桌面主入口直指 `runtime\pythonw.exe -m app.desktop`（无控制台），新增「Aurora（排障控制台）」入口（带控制台输出便于排查）；
+- **desktop.py 自举加固**：
+  - 启动时自动把 site-packages 加入 `sys.path`（双保险）、自动推导 AI_ASSISTANT_* 环境变量（未设置时才生效，服务器部署不受影响）；
+  - 进程 PID 自动写入 `data/aurora.pid`（快捷方式直启也可靠，「停止 Aurora」与卸载程序均可用）；
+  - pywebview 任意环节失败（含 WebView2 Runtime 缺失、pythonnet 初始化失败）自动降级浏览器打开；
+  - 全部输出落盘 `data\desktop.log`。
+
+### 测试
+
+- 新增 `tests/test_desktop.py`（5 项）：env 推导/尊重既有值、pid 写入、就绪探测超时、sys.path 注入。
+- 测试总数 352 → **357 项**，全部通过。
+
 ## [1.6.0] — 2026-11-07
 
 Codex 工具链与反代模式 + 桌面模式：接入 codex 反代模型时，网关不再注入自家提示词，仅以标准 function calling 提供 Codex 同款工具链（模型自带提示词 + 工具环境 = 完整性能）；本地可启动**原生窗口**，不再依赖浏览器。
