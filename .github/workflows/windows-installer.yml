@@ -63,11 +63,10 @@ jobs:
 
       - name: Compile installer (Inno Setup)
         shell: pwsh
-        env:
-          APP_VERSION: ${{ github.ref_name }}
         run: |
-          $ver = $env:APP_VERSION.TrimStart("v")
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAPP_VERSION=$ver installer/windows/installer.iss
+          $env:APP_VERSION = $env:GITHUB_REF_NAME.TrimStart("v")
+          Write-Host "编译版本: $($env:APP_VERSION)"
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer/windows/installer.iss
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Get-ChildItem installer/windows/dist
 

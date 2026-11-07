@@ -1,10 +1,12 @@
 ; Aurora Windows 安装器（Inno Setup 6）
-; 编译：ISCC /DAPP_VERSION=1.5.0 installer.iss
+; 编译：ISCC /DAPP_VERSION=<版本> installer.iss（CI 由 tag 推导传入）
 ; 布局：{localappdata}\Aurora\{backend\{app,site-packages}, frontend\dist, config, runtime, data}
 ; 选 LOCALAPPDATA（PrivilegesRequired=lowest）：免管理员、应用内在线更新可直接写入
 
+; 版本：优先取环境变量 APP_VERSION（CI 由 tag 推导，无 v 前缀），缺省 1.6.0
+#define AppVersion GetEnv("APP_VERSION")
 #ifndef AppVersion
-  #define AppVersion "1.5.0"
+  #define AppVersion "1.6.0"
 #endif
 
 #define RepoRoot GetEnv("GITHUB_WORKSPACE")
