@@ -68,6 +68,12 @@ export const fileUrl = (objectId) => base(`/files/${encodeURIComponent(objectId)
 // ---- 代码执行 ----
 export const runCode = (code) => http.post(base('/run-code'), { code })
 
+// ---- 自更新 ----
+export const getUpdateInfo = () => http.get(base('/system/update/info'))
+export const checkUpdate = () => http.get(base('/system/update/check'))
+export const applyUpdate = (tag = '', sha256 = '') =>
+  http.post(base('/system/update/apply'), { tag, sha256 })
+
 // ---- 压缩 ----
 export const triggerCompress = (sessionId) =>
   http.post(base('/compress'), { session_id: sessionId })
@@ -115,6 +121,9 @@ export default {
   uploadImage,
   fileUrl,
   runCode,
+  getUpdateInfo,
+  checkUpdate,
+  applyUpdate,
   triggerCompress,
   getSessions,
   createSession,

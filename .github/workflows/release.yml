@@ -1,0 +1,53 @@
+name: Release
+
+# 打 v* tag 自动构建离线 tarball 并发布到 GitHub Releases，
+# 发布后所有已安装实例即可通过「设置 → 关于与更新」在线升级。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Package tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          bash scripts/package-tarball.sh --version "$VERSION"
+          echo "TARBALL=$(ls dist/aurora-*-linux-*.tar.gz | head -1)" >> "$GITHUB_ENV"
+
+      - name: Compute sha256
+        run: |
+          sha256sum "$TARBALL" > "$TARBALL.sha256"
+          echo "TARBALL_SHA256=$TARBALL.sha256" >> "$GITHUB_ENV"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Aurora ${{ github.ref_name }}
+          body: |
+            在线更新：已安装实例打开 **设置 → 关于与更新 → 检查更新** 即可一键升级。
+            离线安装：下载 tarball 后执行 `sudo bash install-tarball.sh`（幂等，重复执行即升级）。
+          files: |
+            ${{ env.TARBALL }}
+            ${{ env.TARBALL_SHA256 }}

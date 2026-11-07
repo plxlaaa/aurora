@@ -169,6 +169,66 @@
       </div>
     </section>
 
+    <section class="card">
+      <h2 class="card-title">关于与更新</h2>
+      <div class="update-row">
+        <span class="ver-badge">{{ updateInfo.version || '…' }}</span>
+        <span class="ver-meta" v-if="updateInfo.repo">{{ updateInfo.repo }}</span>
+        <span class="ver-meta" v-if="updateInfo.token_configured === false" style="color: var(--text-weak)">
+          （私有仓库建议配置 GITHUB_TOKEN）
+        </span>
+      </div>
+      <div class="update-row" v-if="updateInfo.mirrors && updateInfo.mirrors.length">
+        <span class="run-label">下载渠道（加速镜像优先，失败自动切换，官方兜底）：</span>
+      </div>
+      <div class="channel-list" v-if="updateInfo.mirrors && updateInfo.mirrors.length">
+        <span class="channel" v-for="(m, i) in updateInfo.mirrors" :key="m">优先级{{ i + 1 }}：{{ m }}</span>
+        <span class="channel">兜底：{{ updateInfo.official }}</span>
+      </div>
+      <div v-if="updateCheck" class="update-result">
+        <template v-if="updateCheck.error">
+          <span class="run-label err">检查失败：{{ updateCheck.error }}</span>
+        </template>
+        <template v-else>
+          <div class="update-row">
+            <span>最新版本 <b>{{ updateCheck.latest }}</b></span>
+            <span class="ver-badge ok" v-if="updateCheck.has_update">可更新</span>
+            <span class="ver-badge" v-else>已是最新</span>
+          </div>
+          <div class="run-label" v-if="updateCheck.asset">
+            资产：{{ updateCheck.asset.name }}（{{ Math.round((updateCheck.asset.size || 0) / 1048576 * 10) / 10 }} MB）
+          </div>
+          <details v-if="updateCheck.notes"><summary>更新日志</summary>
+            <pre class="notes">{{ updateCheck.notes }}</pre>
+          </details>
+        </template>
+      </div>
+      <div v-if="applyReport" class="update-result">
+        <div class="update-row">
+          <span class="run-label" :class="{ err: !applyReport.ok }">
+            {{ applyReport.ok ? (applyReport.noop ? applyReport.message : '更新完成') : ('更新失败：' + applyReport.error) }}
+          </span>
+        </div>
+        <ol class="steps">
+          <li v-for="(s, i) in applyReport.steps || []" :key="i">{{ s }}</li>
+        </ol>
+        <div v-if="applyReport.channels && applyReport.channels.length" class="run-label">
+          渠道尝试：
+          <span v-for="c in applyReport.channels" :key="c.channel" class="channel" :class="{ fail: !c.ok }">
+            {{ c.channel }}（{{ c.ok ? '成功 ' + c.seconds + 's' : '失败' }}）
+          </span>
+        </div>
+        <div class="run-label" v-if="applyReport.restart">{{ applyReport.restart }}</div>
+      </div>
+      <footer class="footer">
+        <button :disabled="updating" @click="doCheckUpdate">{{ checking ? '检查中…' : '检查更新' }}</button>
+        <button class="primary" :disabled="checking || !updateCheck || !updateCheck.has_update"
+                @click="doApplyUpdate">
+          {{ updating ? '更新中，请勿关闭页面…' : '一键更新' }}
+        </button>
+      </footer>
+    </section>
+
     <footer class="footer">
       <button class="primary" :disabled="saving" @click="saveAll">
         {{ saving ? '保存中…' : '保存全部' }}
@@ -188,7 +248,10 @@ import {
   saveSandbox,
   getModelCatalog,
   saveModelCatalog,
-  runCode as execCode
+  runCode as execCode,
+  getUpdateInfo,
+  checkUpdate,
+  applyUpdate
 } from '../api'
 
 const notice = ref({ text: '', type: 'ok' })
@@ -364,7 +427,50 @@ async function runCode() {
   }
 }
 
-onMounted(loadAll)
+/* ---------- 关于与更新 ---------- */
+const updateInfo = reactive({ version: '', repo: '', mirrors: [], official: '', backup_dir: '', token_configured: true })
+const updateCheck = ref(null)
+const applyReport = ref(null)
+const checking = ref(false)
+const updating = ref(false)
+
+async function loadUpdateInfo() {
+  try {
+    const d = await getUpdateInfo()
+    Object.assign(updateInfo, d)
+  } catch { /* 静默：更新器信息非关键路径 */ }
+}
+
+async function doCheckUpdate() {
+  checking.value = true
+  applyReport.value = null
+  try {
+    updateCheck.value = await checkUpdate()
+  } catch (e) {
+    updateCheck.value = { error: e.message }
+  } finally {
+    checking.value = false
+  }
+}
+
+async function doApplyUpdate() {
+  if (!confirm(`确认更新到 ${updateCheck.value?.latest} ？更新前会自动备份，过程约 1-3 分钟，请勿关闭页面。`)) return
+  updating.value = true
+  applyReport.value = null
+  try {
+    applyReport.value = await applyUpdate(updateCheck.value?.tag || '', '')
+    if (applyReport.value.ok && !applyReport.value.noop) notify('更新完成，服务已重启')
+    else if (applyReport.value.ok) notify(applyReport.value.message || '已是最新版本')
+    else notify('更新失败：' + applyReport.value.error, 'err')
+  } catch (e) {
+    applyReport.value = { ok: false, error: e.message, steps: [] }
+    notify('更新失败：' + e.message, 'err')
+  } finally {
+    updating.value = false
+  }
+}
+
+onMounted(() => { loadAll(); loadUpdateInfo() })
 </script>
 
 <style scoped>
@@ -513,5 +619,78 @@ button.small {
   gap: 10px;
   justify-content: flex-end;
   padding-bottom: 24px;
+}
+
+/* ---------- 关于与更新 ---------- */
+.update-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 6px 0;
+}
+
+.ver-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ver-badge.ok {
+  color: var(--ok, #2e9e5b);
+  border-color: var(--ok, #2e9e5b);
+}
+
+.ver-meta {
+  font-size: 12px;
+  color: var(--text-weak);
+}
+
+.channel-list {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 6px 0 10px;
+}
+
+.channel {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-weak);
+}
+
+.channel.fail {
+  color: var(--err);
+  border-color: var(--err);
+}
+
+.update-result {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-panel);
+}
+
+.steps {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  font-size: 12px;
+  color: var(--text-weak);
+}
+
+.notes {
+  font-size: 12px;
+  white-space: pre-wrap;
+  max-height: 200px;
+  overflow: auto;
 }
 </style>

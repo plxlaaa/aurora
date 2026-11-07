@@ -772,6 +772,46 @@ async def get_stats(_: Annotated[None, Depends(require_auth)]) -> dict[str, Any]
     }
 
 
+# ---------- 自更新 ----------
+@router.get("/api/system/update/check")
+async def system_update_check(_: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
+    """检查 GitHub 最新 Release，返回是否可更新与下载渠道清单。"""
+    from app.services import updater
+
+    return updater.check_update()
+
+
+@router.post("/api/system/update/apply")
+async def system_update_apply(
+    payload: dict[str, Any], _: Annotated[None, Depends(require_auth)]
+) -> dict[str, Any]:
+    """执行更新：多渠道下载（加速镜像优先→官方兜底）→备份→覆盖→重启。
+
+    body 可选：{"tag": "v1.4.0", "sha256": "..."} 用于锁定目标版本与校验。
+    """
+    from app.services import updater
+
+    tag = str(payload.get("tag") or "")
+    sha = str(payload.get("sha256") or "")
+    return await asyncio.to_thread(updater.apply_update, tag, sha)
+
+
+@router.get("/api/system/update/info")
+async def system_update_info(_: Annotated[None, Depends(require_auth)]) -> dict[str, Any]:
+    """更新器信息：当前版本/仓库/渠道链/备份目录。"""
+    from app.services import updater
+    from app.core.version import UPDATE_REPO
+
+    return {
+        "version": updater.current_version(),
+        "repo": UPDATE_REPO,
+        "mirrors": updater.MIRRORS,
+        "official": updater.OFFICIAL_BASE,
+        "backup_dir": str(updater.BACKUP_DIR),
+        "token_configured": bool(updater.GITHUB_TOKEN),
+    }
+
+
 # ---------- WebSocket ----------
 # 附件数据缓存（object_id -> 原始字节）；LRU 上限防内存泄漏
 _ATTACH_CACHE_MAX = 32

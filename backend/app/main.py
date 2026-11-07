@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from .core import middleware as mw
 from .core.errors import STATUS_CODE_MAP, AppError, ErrorCode, error_body
 from .core.runtime import runtime
+from .core.version import APP_VERSION
 from .routers import deps
 from .routers.api import router
 
@@ -42,7 +43,7 @@ async def lifespan(_app: FastAPI):
 def _create_app() -> FastAPI:
     app = FastAPI(
         title="AI Assistant Gateway",
-        version="1.3.0",
+        version=APP_VERSION,
         description=(
             "单机 AI 智能助手网关：多轮对话、视觉理解、上下文压缩、"
             "Skills / MCP / 自定义工具、会话管理与流式输出。"
