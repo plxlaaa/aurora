@@ -44,6 +44,17 @@ def _bootstrap_paths() -> None:
     sp = BACKEND_DIR / "site-packages"
     if sp.is_dir() and str(sp) not in sys.path:
         sys.path.append(str(sp))
+        # pywin32 wheel 在 pip --target + ._pth 隔离布局下，其自带的
+        # pywin32.pth 引导（win32\lib 进 path、pywin32_system32 注册 DLL
+        # 目录）不会被 site 处理——手动补全，否则 mcp 的 Windows 分支
+        # import pywintypes 直接崩，后端起不来（v1.6.1 实测 CI 雷点）
+        for sub in ("win32", os.path.join("win32", "lib"), "Pythonwin"):
+            p = sp / sub
+            if p.is_dir() and str(p) not in sys.path:
+                sys.path.append(str(p))
+        dll_dir = sp / "pywin32_system32"
+        if dll_dir.is_dir():
+            os.add_dll_directory(str(dll_dir))
 
 
 def _bootstrap_env() -> Path:
@@ -130,6 +141,15 @@ def _selfcheck() -> int:
     ok &= step("import fastapi", lambda: importlib.import_module("fastapi").__name__)
     ok &= step("import uvicorn", lambda: importlib.import_module("uvicorn").__name__)
     ok &= step("import httpx", lambda: importlib.import_module("httpx").__name__)
+
+    def _pywin32_check() -> str:
+        if os.name != "nt":
+            raise RuntimeError("非 Windows")
+        importlib.import_module("pywintypes")
+        return "pywintypes 可用"
+
+    ok &= step("pywin32(pywintypes)", _pywin32_check,
+               optional=(os.name != "nt"))
     ok &= step("env 推导 + data 可写", lambda: str(_bootstrap_env()))
     ok &= step("pid 写入", lambda: str(_write_pid(_bootstrap_env())))
 
