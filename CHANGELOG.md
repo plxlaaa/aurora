@@ -2,6 +2,31 @@
 
 本文件记录 Aurora AI 智能助手的版本变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.4.0] — 2026-11-07
+
+应用内自更新：装好后无需重装、无需命令行，管理台一键升级。多渠道下载（加速镜像优先、失败自动切换、官方兜底），更新前自动备份、失败自动回滚。
+
+### 新增
+
+- **更新器服务**（`app/services/updater.py`）：检查 GitHub 最新 Release → 逐渠道下载 → sha256 校验 → 安全解压（防路径穿越，拒绝符号链接）→ 备份（保留最近 3 份）→ 覆盖代码 → 依赖更新 → 重启；任一步失败自动回滚到更新前版本。
+- **多渠道下载**：4 个加速镜像（ghfast.top / gh-proxy.com / ghproxy.net / github.moeyy.xyz）优先，单渠道超时或失败自动切换下一个，全部失败后回退官方直连。私有仓库走 GitHub API asset 端点（`Accept: application/octet-stream`）。可用环境变量覆盖镜像清单。
+- **凭据安全**：GitHub token 仅随官方直连请求发送，绝不发给第三方镜像渠道（单测断言固化）。
+- **API**（均要求鉴权）：`GET /api/system/update/check`（检查更新）、`POST /api/system/update/apply`（执行更新，支持锁定目标版本与 sha256）、`GET /api/system/update/info`（版本/渠道/备份目录）。
+- **管理台 UI**：设置页新增「关于与更新」卡片——当前版本徽章、渠道优先级清单、检查更新、一键更新（确认弹窗 + 步骤日志 + 渠道成败展示）。
+- **Release CI**（`.github/workflows/release.yml`）：打 `v*` tag 自动构建离线 tarball 并发布到 GitHub Releases（附 sha256），已装实例随即可以在线更新。
+- **版本统一**：`app/core/version.py` 作为唯一版本源（打包脚本、`/api/health`、更新器共用）。
+
+### 安全边界
+
+- 更新永不触碰：`config/*.local.yaml`、`gateway.env`、会话与附件数据、`.venv`。
+- 备份产物位于 `data/backups/`，与用户数据同区管理。
+
+### 测试
+
+- 新增 `tests/test_updater.py`（15 项）：版本比较（含 `v` 前缀/后缀）、渠道链顺序、**token 不外泄给镜像**、多渠道失败回退、sha 校验失败拒绝、备份修剪（保留 3 份）、`*.local.yaml` 保护、已是最新时 no-op、校验和不符时回滚。
+- 测试总数 **321 → 341 项**（+20），全部通过。
+- **真实链路 E2E**：构建 tarball → 发布 GitHub Release → 真机起服务执行 apply，实测「4 镜像全部失败（私有仓库）→ 自动切换官方 API 下载成功 → 备份 → 覆盖 → 依赖更新」全链路通过；期间抓出并修复 `install_deps` 字符串路径拼接缺陷（回滚机制实战验证有效）。
+
 ## [1.3.0] — 2026-10-09
 
 修复 gzip 多块响应体损坏与静态托管路径穿越两个真实生产缺陷，强化会话持久化 durability 与长连接健壮性，Linux / Windows 安装脚本的健康检查与日志治理能力补齐。

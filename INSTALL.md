@@ -694,7 +694,24 @@ config/
 
 ## 八、升级与卸载
 
-### 升级
+### 应用内在线更新（v1.4.0+，推荐）
+
+装好之后无需重装、无需命令行——管理台 **设置 → 关于与更新**：
+
+1. **检查更新**：对比 GitHub 最新 Release 与当前版本，展示更新日志与资产信息
+2. **一键更新**：自动完成 下载 → 校验 → 备份 → 覆盖 → 依赖更新 → 重启，全程步骤可见
+
+下载渠道策略：优先走加速镜像（`ghfast.top` / `gh-proxy.com` / `ghproxy.net` / `github.moeyy.xyz`），
+某个渠道超时或失败**自动切换下一个**，全部失败后回退官方 `github.com` 直连（私有仓库需在
+环境变量中配置 `GITHUB_TOKEN`，token 仅随官方直连发送，绝不发给第三方镜像）。
+
+- 更新前自动备份 `backend/app`、`frontend/dist`、`config` 至 `data/backups/`（保留最近 3 份）
+- 更新失败自动回滚到更新前版本
+- 永不触碰：`config/*.local.yaml`、`gateway.env`、会话与附件数据
+- systemd 部署自动重启服务；非 systemd 环境按页面提示手动重启
+- 版本发布节奏：主仓库打 `v*` tag 后 CI 自动构建并发布 Release，已装实例即可在线更新
+
+### 命令行升级（离线 / 无管理台场景）
 
 ```bash
 # Linux systemd
