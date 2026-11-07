@@ -164,6 +164,13 @@ def _selfcheck() -> int:
 
 
 def main() -> int:
+    # Windows 控制台/管道默认 locale 编码（cp1252/cp936）打中文会炸，
+    # 统一切到 UTF-8（不可编码字符替换，不影响功能）
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     _bootstrap_paths()
     data_root = _bootstrap_env()
     _setup_logging(data_root)
