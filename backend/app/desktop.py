@@ -44,10 +44,11 @@ def _bootstrap_paths() -> None:
     sp = BACKEND_DIR / "site-packages"
     if sp.is_dir() and str(sp) not in sys.path:
         sys.path.append(str(sp))
-        # pywin32 wheel 在 pip --target + ._pth 隔离布局下，其自带的
-        # pywin32.pth 引导（win32\lib 进 path、pywin32_system32 注册 DLL
-        # 目录）不会被 site 处理——手动补全，否则 mcp 的 Windows 分支
-        # import pywintypes 直接崩，后端起不来（v1.6.1 实测 CI 雷点）
+    # pywin32 需无条件补全（与 sp 是否已在 sys.path 无关）：
+    # ._pth 隔离下 wheel 自带的 pywin32.pth 引导不被 site 处理，
+    # win32\lib 不进 path / pywin32_system32 不注册 DLL 目录 →
+    # mcp 的 Windows 分支 import pywintypes 崩，后端起不来（CI 实锤）
+    if sp.is_dir():
         for sub in ("win32", os.path.join("win32", "lib"), "Pythonwin"):
             p = sp / sub
             if p.is_dir() and str(p) not in sys.path:
