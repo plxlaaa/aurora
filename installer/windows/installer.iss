@@ -27,7 +27,6 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayName=Aurora AI 助手
-UninstallDisplayVersion={#AppVersion}
 LicenseFile={#RepoRoot}\installer\windows\LICENSE.txt
 
 [Languages]
