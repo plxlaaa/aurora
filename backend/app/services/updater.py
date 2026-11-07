@@ -305,7 +305,7 @@ def install_deps() -> str:
     """用现有 venv 安装/更新依赖；无 venv 则跳过。"""
     for name in ("venv", ".venv"):
         venv = APP_ROOT / "backend" / name
-        pip = venv / ("Scripts" / "pip.exe" if os.name == "nt" else "bin" / "pip")
+        pip = venv / (Path("Scripts") / "pip.exe" if os.name == "nt" else Path("bin") / "pip")
         if pip.exists():
             import subprocess
             r = subprocess.run(
