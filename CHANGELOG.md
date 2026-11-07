@@ -2,6 +2,21 @@
 
 本文件记录 Aurora AI 智能助手的版本变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.6.2] — 2026-11-08
+
+修复桌面模式静默崩溃（装后启动无任何反应）：**新增 Windows 真机自检流水线**，在 GitHub Windows runner 上以与安装器完全一致的方式组装并逐项验证自举链路，本轮挖出并修复 3 个沙箱永远测不到的真雷。
+
+### 修复（均由 CI 真机复现实锤）
+
+- **pywin32 缺失**：Aurora 的 MCP 依赖在 Windows 分支 `import pywintypes`，requirements 一直没装 pywin32 → `from app.main import app` 即崩 → pythonw 静默退出（无窗口/无浏览器/无日志）。已显式安装；
+- **pywin32.pth 引导失效**：`pip --target` + `._pth` 隔离布局下，wheel 自带的引导脚本不被 site 处理——桌面自举改为**无条件**补全 `win32`/`win32\lib` 路径并注册 `pywin32_system32` DLL 目录（此前的条件判断在 ._pth 已含 site-packages 时被跳过，CI 复现实锤）；
+- **控制台编码崩溃**：Windows 管道/控制台默认 locale 编码（cp1252/cp936）打印中文会炸进程，stdout/stderr 强制 UTF-8。
+
+### 新增
+
+- **`python -m app.desktop --selfcheck`**：分步真机自检（解释器/sys.path/依赖/pywin32/env/pid/起服健康检查/pywebview/pythonnet），任何一步 FAIL 带完整栈；
+- **Windows Selfcheck 流水线**：push 自动在真实 Windows 上复现安装器自举链路（embeddable python + `._pth` 注入 + pip --target），webview/pythonnet 在 Windows 上 WARN 即失败。最终状态：**全部 PASS**（含 pythonw 无控制台启动路径）。
+
 ## [1.6.1] — 2026-11-08
 
 修复 Windows 安装版启动即崩（黑框一闪而过）：embeddable Python 的 `._pth` 隔离模式会**忽略 PYTHONPATH**，导致 site-packages 不可见、依赖导入失败且无任何报错。

@@ -6,7 +6,7 @@
 ; 版本：优先取环境变量 APP_VERSION（CI 由 tag 推导，无 v 前缀），缺省 1.6.0
 #define AppVersion GetEnv("APP_VERSION")
 #ifndef AppVersion
-  #define AppVersion "1.6.1"
+  #define AppVersion "1.6.2"
 #endif
 
 #define RepoRoot GetEnv("GITHUB_WORKSPACE")
