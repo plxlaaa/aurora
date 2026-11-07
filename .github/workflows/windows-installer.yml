@@ -1,0 +1,97 @@
+name: Windows Installer
+
+# 打 v* tag 在 windows-latest 上用 Inno Setup 编译 AuroraSetup-<版本>.exe，
+# 作为资产追加到同一 Release（linux tarball 由 release.yml 产出）。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_EMBED_URL: https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Assemble stage (runtime + backend + site-packages + frontend + scripts)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force stage/backend, stage/frontend, stage/config, stage/runtime | Out-Null
+          Copy-Item -Recurse backend/app stage/backend/app
+          Copy-Item backend/requirements.txt stage/backend/
+          Copy-Item -Recurse frontend/dist stage/frontend/dist
+          Copy-Item -Recurse config/* stage/config/
+          Copy-Item installer/windows/aurora.bat, installer/windows/aurora-stop.bat, installer/windows/start-aurora.ps1, installer/windows/README.txt stage/
+          Invoke-WebRequest $env:PYTHON_EMBED_URL -OutFile py-embed.zip
+          Expand-Archive py-embed.zip -DestinationPath stage/runtime
+          python -m pip install -r backend/requirements.txt --target stage/backend/site-packages --quiet
+          Get-ChildItem stage | Select-Object Name
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Ensure Chinese language file (fallback to English UI)
+        shell: pwsh
+        run: |
+          $isl = "C:\Program Files (x86)\Inno Setup 6\Languages\ChineseSimplified.isl"
+          if (-not (Test-Path $isl)) {
+            Copy-Item "C:\Program Files (x86)\Inno Setup 6\Default.isl" $isl
+            Write-Host "ChineseSimplified.isl 不存在，已用 Default.isl 兜底（界面为英文）"
+          } else { Write-Host "官方中文语言包可用" }
+
+      - name: Compile installer (Inno Setup)
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ github.ref_name }}
+        run: |
+          $ver = $env:APP_VERSION.TrimStart("v")
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DAPP_VERSION=$ver installer/windows/installer.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-ChildItem installer/windows/dist
+
+      - name: Compute sha256
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem installer/windows/dist/AuroraSetup-*.exe | Select-Object -First 1
+          (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower() | Out-File "$($exe.FullName).sha256" -Encoding ascii
+          Write-Host "sha256: $(Get-Content "$($exe.FullName).sha256")"
+
+      - name: Wait for Release to exist (created by release.yml)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for ($i = 0; $i -lt 30; $i++) {
+            if (gh release view $env:GITHUB_REF_NAME -R $env:GITHUB_REPOSITORY 2>$null) { Write-Host "Release 已就绪"; exit 0 }
+            Start-Sleep -Seconds 30
+          }
+          Write-Host "等待超时，将由上传步骤自行创建 Release"
+
+      - name: Upload installer to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            installer/windows/dist/AuroraSetup-*.exe
+            installer/windows/dist/AuroraSetup-*.exe.sha256
+          fail_on_unmatched_files: true

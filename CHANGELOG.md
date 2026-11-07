@@ -2,6 +2,21 @@
 
 本文件记录 Aurora AI 智能助手的版本变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.5.0] — 2026-11-07
+
+Windows 原生安装器：向导式安装（许可/目录/快捷方式），内置 Python 运行时免安装依赖，装完即用；自带卸载程序（两级确认：先确认卸载，再询问是否保留用户数据，默认保留）。
+
+### 新增
+
+- **Windows 安装器**（`installer/windows/`，Inno Setup 6 编译 `AuroraSetup-<版本>.exe`）：
+  - 向导式安装：许可协议 → 安装目录（默认 `%LOCALAPPDATA%\Aurora`，免管理员）→ 开始菜单/桌面快捷方式；
+  - 免安装运行：内置 Python 3.11 embeddable + 预装依赖（site-packages），装完即可启动；
+  - 启动入口 `aurora.bat`（记录 PID、打开浏览器），停止入口 `aurora-stop.bat`（按 PID 精确终止）；
+  - 卸载程序：开始菜单入口 + Windows「应用和功能」注册表项；卸载流程 = 确认卸载 → 按 PID 停止进程 → 询问是否保留用户数据（**默认保留**，明确选「否」才删除 `data\` 与 `config\`）；
+  - 安装/升级不覆盖 `config/*.local.yaml`、`data\`（Inno 仅覆盖安装时记录的程序文件）。
+- **Release CI**（`.github/workflows/windows-installer.yml`）：打 `v*` tag 在 windows-latest 构建前端 + 组装 runtime/site-packages → ISCC 编译 → sha256 → 追加到同一 Release。
+- 安装器形态与 v1.4.0 应用内在线更新兼容：安装目录即 `APP_ROOT`，更新只覆盖 `backend\app`、`frontend\dist` 等，运行目录可写（LOCALAPPDATA）。
+
 ## [1.4.0] — 2026-11-07
 
 应用内自更新：装好后无需重装、无需命令行，管理台一键升级。多渠道下载（加速镜像优先、失败自动切换、官方兜底），更新前自动备份、失败自动回滚。
