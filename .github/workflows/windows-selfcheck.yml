@@ -1,0 +1,73 @@
+# Windows 真机自检：用与安装器完全相同的方式组装 stage
+# （embeddable python + ._pth 注入 + pip --target），然后跑
+# python -m app.desktop --selfcheck 分步验证桌面模式自举链路。
+# 目的：沙箱测不出 embeddable 隔离问题，这里在真实 Windows 上复现。
+name: Windows Selfcheck
+
+on:
+  push:
+    branches: [main]
+    paths: [".github/workflows/windows-selfcheck.yml", "backend/**", "frontend/dist-version"]
+  workflow_dispatch: {}
+
+jobs:
+  selfcheck:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build frontend dist (selfcheck 仅需占位 dist)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force frontend/dist | Out-Null
+          "<html><body>selfcheck placeholder</body></html>" | Out-File frontend/dist/index.html -Encoding utf8
+
+      - name: Assemble stage (same as installer)
+        shell: pwsh
+        env:
+          PYTHON_EMBED_URL: https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip
+        run: |
+          New-Item -ItemType Directory -Force stage/backend, stage/runtime, stage/frontend | Out-Null
+          Copy-Item -Recurse backend/app stage/backend/app
+          Copy-Item backend/requirements.txt stage/backend/
+          Copy-Item -Recurse frontend/dist stage/frontend/dist
+          Copy-Item -Recurse config/* stage/config/
+          Invoke-WebRequest $env:PYTHON_EMBED_URL -OutFile py-embed.zip
+          Expand-Archive py-embed.zip -DestinationPath stage/runtime
+          Add-Content stage/runtime/python311._pth "`n..\backend`n..\backend\site-packages`nimport site"
+          python -m pip install -r backend/requirements.txt --target stage/backend/site-packages --quiet
+          python -m pip install -r backend/requirements-desktop.txt --target stage/backend/site-packages --quiet
+          Get-Content stage/runtime/python311._pth
+
+      - name: Selfcheck (embeddable python)
+        shell: pwsh
+        working-directory: stage
+        run: |
+          & ".\runtime\python.exe" -m app.desktop --selfcheck *>&1 | Tee-Object -Variable out
+          $txt = $out -join "`n"
+          # Windows 上 webview/pythonnet 必须真正可用（WARN 亦视为失败）
+          if ($txt -match "WARN import webview" -or $txt -match "WARN pythonnet") {
+            Write-Host "::error::Windows 桌面组件不可用（webview/pythonnet WARN）"
+            exit 1
+          }
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::selfcheck 失败，见上方 FAIL 步骤"
+            exit 1
+          }
+
+      - name: Selfcheck via pythonw (与快捷方式同路径)
+        shell: pwsh
+        working-directory: stage/backend
+        run: |
+          # pythonw 无控制台：仅验证能启动并写 pid，5 秒后结束进程
+          $p = Start-Process -FilePath "..\runtime\pythonw.exe" -ArgumentList "-m","app.desktop","--selfcheck" -PassThru -RedirectStandardOutput ..\pythonw-out.txt -RedirectStandardError ..\pythonw-err.txt
+          $p.WaitForExit(60000) | Out-Null
+          Get-Content ..\pythonw-out.txt
+          Get-Content ..\pythonw-err.txt
+          if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; exit 1 }
+          exit $p.ExitCode

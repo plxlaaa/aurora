@@ -105,11 +105,72 @@ def _open_browser(base_url: str) -> None:
     webbrowser.open(base_url)
 
 
+def _selfcheck() -> int:
+    """真机分步自检（python -m app.desktop --selfcheck），逐项 PASS/FAIL。"""
+    import importlib
+
+    def step(name: str, fn, optional: bool = False) -> bool:
+        try:
+            detail = fn()
+            print(f"PASS {name}" + (f" | {detail}" if detail else ""), flush=True)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            tag = "WARN" if optional else "FAIL"
+            print(f"{tag} {name}: {exc!r}", flush=True)
+            if not optional:
+                traceback.print_exc()
+            return True if optional else False
+
+    ok = True
+    ok &= step("python 解释器", lambda: sys.executable)
+    ok &= step("sys.path 含 backend", lambda: next(
+        p for p in sys.path if Path(p).name == "backend"))
+    ok &= step("sys.path 含 site-packages", lambda: next(
+        p for p in sys.path if "site-packages" in Path(p).as_posix()))
+    ok &= step("import fastapi", lambda: importlib.import_module("fastapi").__name__)
+    ok &= step("import uvicorn", lambda: importlib.import_module("uvicorn").__name__)
+    ok &= step("import httpx", lambda: importlib.import_module("httpx").__name__)
+    ok &= step("env 推导 + data 可写", lambda: str(_bootstrap_env()))
+    ok &= step("pid 写入", lambda: str(_write_pid(_bootstrap_env())))
+
+    def _serve_check() -> str:
+        port = _free_port()
+        from app.main import app as fastapi_app
+        threading.Thread(
+            target=_serve, args=(fastapi_app, port), daemon=True,
+        ).start()
+        if not _wait_ready(f"http://127.0.0.1:{port}", timeout=20):
+            raise RuntimeError("后端健康检查超时")
+        return f"port={port}"
+
+    ok &= step("后端起服 + /api/health", _serve_check)
+
+    def _webview_check() -> str:
+        webview = importlib.import_module("webview")
+        return f"pywebview {getattr(webview, '__version__', '?')}"
+
+    # 平台相关：Windows 必过（CI 断言无 WARN），Linux 沙箱可缺席
+    ok &= step("import webview", _webview_check, optional=True)
+
+    def _clr_check() -> str:
+        clr = importlib.import_module("clr")
+        clr.AddReference("System")
+        return "pythonnet/.NET 初始化成功"
+
+    ok &= step("pythonnet(clr) 初始化", _clr_check, optional=True)
+
+    print("SELFCHECK", "PASSED" if ok else "FAILED", flush=True)
+    return 0 if ok else 1
+
+
 def main() -> int:
     _bootstrap_paths()
     data_root = _bootstrap_env()
     _setup_logging(data_root)
     _write_pid(data_root)
+
+    if "--selfcheck" in sys.argv:
+        return _selfcheck()
 
     from app.main import app
 
