@@ -1,5 +1,6 @@
 @echo off
-rem Aurora 启动入口：写 PID 便于精确停止；数据与配置全部锚定安装目录
+rem Aurora 主入口：桌面模式（原生窗口，不开浏览器）
+rem 数据与配置全部锚定安装目录；PID 记录供精确停止
 setlocal
 cd /d "%~dp0"
 if not exist data mkdir data
@@ -11,13 +12,12 @@ set "AI_ASSISTANT_UPLOAD_DIR=%~dp0data\uploads"
 set "AI_ASSISTANT_SKILLS_DIR=%~dp0config\skills"
 set "AI_ASSISTANT_FRONTEND_DIR=%~dp0frontend\dist"
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-aurora.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$p = Start-Process -FilePath '%~dp0runtime\python.exe' -ArgumentList '-m','app.desktop' -WorkingDirectory '%~dp0backend' -WindowStyle Minimized -PassThru; Set-Content -Path '%~dp0data\aurora.pid' -Value $p.Id -Encoding ascii"
 if errorlevel 1 (
-  echo 启动失败，请查看 start-aurora.ps1 输出。
+  echo 启动失败，请尝试"aurora-web.bat"（浏览器模式）排查。
   pause
   exit /b 1
 )
-start "" http://127.0.0.1:8080
-echo Aurora 已启动：http://127.0.0.1:8080
-echo 停止请运行 aurora-stop.bat（或开始菜单"停止 Aurora"）。
-timeout /t 3 >nul
+echo Aurora 桌面窗口已启动（停止请运行 aurora-stop.bat）。
+timeout /t 2 >nul

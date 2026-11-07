@@ -42,10 +42,11 @@ jobs:
           Copy-Item backend/requirements.txt stage/backend/
           Copy-Item -Recurse frontend/dist stage/frontend/dist
           Copy-Item -Recurse config/* stage/config/
-          Copy-Item installer/windows/aurora.bat, installer/windows/aurora-stop.bat, installer/windows/start-aurora.ps1, installer/windows/README.txt stage/
+          Copy-Item installer/windows/aurora.bat, installer/windows/aurora-web.bat, installer/windows/aurora-stop.bat, installer/windows/start-aurora.ps1, installer/windows/README.txt stage/
           Invoke-WebRequest $env:PYTHON_EMBED_URL -OutFile py-embed.zip
           Expand-Archive py-embed.zip -DestinationPath stage/runtime
           python -m pip install -r backend/requirements.txt --target stage/backend/site-packages --quiet
+          python -m pip install -r backend/requirements-desktop.txt --target stage/backend/site-packages --quiet
           Get-ChildItem stage | Select-Object Name
 
       - name: Install Inno Setup

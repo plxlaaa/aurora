@@ -42,7 +42,8 @@ Source: "{#RepoRoot}\stage\*"; DestDir: "{app}"; Flags: recursesubdirs createall
 Name: "{app}\data"
 
 [Icons]
-Name: "{group}\Aurora"; Filename: "{app}\aurora.bat"; Comment: "Aurora AI 助手 (http://127.0.0.1:8080)"
+Name: "{group}\Aurora"; Filename: "{app}\aurora.bat"; Comment: "Aurora AI 助手（桌面窗口）"
+Name: "{group}\Aurora（浏览器模式）"; Filename: "{app}\aurora-web.bat"; Comment: "浏览器访问 http://127.0.0.1:8080"
 Name: "{group}\停止 Aurora"; Filename: "{app}\aurora-stop.bat"; Comment: "停止本地 Aurora 进程"
 Name: "{group}\卸载 Aurora"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\Aurora"; Filename: "{app}\aurora.bat"; Tasks: desktopicon

@@ -224,15 +224,20 @@ class ChatPipeline:
 
         # 1. 视觉路由（如含图片）
         image_attachments = [a for a in attachments if a.get("type") == "image"]
+        codex_mode = bool(getattr(_ep_info, "codex_compat", False))
         if image_attachments:
             endpoint_name, _ = self.vision.select_model()
             if endpoint_name != "main":
                 vis_client = self.registry.get("vision")
                 if vis_client is None:
                     raise RuntimeError("视觉端点不可用")
-                vision_messages = self._inject_system(
-                    list(messages), self.tools.build_directory()
-                )
+                if codex_mode:
+                    # 反代模式：不注入 Aurora 工具目录，保持模型自带提示词纯净
+                    vision_messages = list(messages)
+                else:
+                    vision_messages = self._inject_system(
+                        list(messages), self.tools.build_directory()
+                    )
                 self.vision.attach_image_to_messages(vision_messages, image_attachments)
                 return await self._vision_roundtrip(vis_client, vision_messages, sink, cancel)
             self.vision.attach_image_to_messages(messages, image_attachments)
@@ -249,8 +254,17 @@ class ChatPipeline:
             })
 
         # 3+4. 主模型推理 + 工具循环
-        tools = self.collect_tools()
-        history = self._inject_system(list(messages), self.tools.build_directory())
+        if codex_mode:
+            # 反代模式（codex_compat=true）：模型自带 codex 提示词，
+            # 网关不注入自家 system prompt 与 ReAct 文本协议，
+            # 仅以标准 function calling 提供 codex 同款工具链。
+            from app.services.codex_tools import definitions as _codex_defs
+            tools = _codex_defs()
+            history = list(messages)
+            logger.info("codex 反代模式：跳过 system 注入，挂载 codex 工具链 (%d 项)", len(tools))
+        else:
+            tools = self.collect_tools()
+            history = self._inject_system(list(messages), self.tools.build_directory())
 
         for _round in range(MAX_TOOL_ROUNDS):
             if cancelled():
@@ -453,7 +467,7 @@ class ChatPipeline:
                 "session_id": session_id, "name": name, "arguments": arguments,
             })
             try:
-                result = await self.tools.dispatch(name, arguments)
+                result = await self.tools.dispatch(name, arguments, session_id=session_id)
                 if isinstance(result, dict) and result.get("error"):
                     status = "error"
             except Exception as exc:  # noqa: BLE001

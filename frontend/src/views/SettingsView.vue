@@ -46,6 +46,10 @@
             <input v-model="ep.enabled" type="checkbox" />
             <span>启用</span>
           </label>
+          <label class="field check" title="接入 codex 反代模型时开启：不注入本站提示词，仅提供 codex 同款工具链（shell/apply_patch 等，在会话工作区执行）">
+            <input v-model="ep.codex_compat" type="checkbox" />
+            <span>反代模式 (codex)</span>
+          </label>
           <div class="field probe-note">
             <span>能力探测：{{ ep.detected_modality || '未知' }}</span>
           </div>
@@ -297,6 +301,7 @@ function applyModels(data) {
       api_key: '',
       modality: ep.modality || 'auto',
       enabled: ep.enabled !== false,
+      codex_compat: !!ep.codex_compat,
       available: !!ep.available,
       detected_modality: ep.detected_modality || ''
     }
@@ -354,7 +359,8 @@ function buildEndpointsPayload() {
       base_url: ep.base_url,
       model_name: ep.model_name,
       modality: ep.modality,
-      enabled: ep.enabled
+      enabled: ep.enabled,
+      codex_compat: !!ep.codex_compat
     }
     // api_key 留空时不发送，后端保留原值
     if (ep.api_key) item.api_key = ep.api_key

@@ -36,6 +36,7 @@ class EndpointInfo:
     model_name: str
     modality: str = "auto"      # auto|multimodal|text
     enabled: bool = True
+    codex_compat: bool = False  # 反代模式：模型自带 codex 提示词，网关仅提供 codex 工具链
     detected_modality: str | None = None  # 能力探测结果
     available: bool = False
     models: list[str] = field(default_factory=list)  # 探测到的可用模型 id
@@ -264,6 +265,7 @@ class ModelRegistry:
                 model_name=ep.get("model_name", name),
                 modality=ep.get("modality", "auto"),
                 enabled=enabled,
+                codex_compat=bool(ep.get("codex_compat", False)),
             )
             new_clients[name] = LLMClient(info)
         self._clients = new_clients
@@ -307,6 +309,7 @@ class ModelRegistry:
                 "base_url": ep.base_url,
                 "model_name": ep.model_name,
                 "modality": ep.modality,
+                "codex_compat": ep.codex_compat,
                 "detected_modality": ep.detected_modality,
                 "available": ep.available,
                 "enabled": ep.enabled,

@@ -2,6 +2,34 @@
 
 本文件记录 Aurora AI 智能助手的版本变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.6.0] — 2026-11-07
+
+Codex 工具链与反代模式 + 桌面模式：接入 codex 反代模型时，网关不再注入自家提示词，仅以标准 function calling 提供 Codex 同款工具链（模型自带提示词 + 工具环境 = 完整性能）；本地可启动**原生窗口**，不再依赖浏览器。
+
+### 新增
+
+- **Codex 兼容工具链**（`app/services/codex_tools.py`，反代模式专用）：
+  - `shell`：会话工作区内执行任意命令（sandbox 模式挂载工作区进临时容器——无网络/内存/CPU 限额；local 模式宿主直跑）；
+  - `apply_patch`：解析并应用 Codex patch 语法（Add / Update / Delete / Move to），防路径穿越（拒绝绝对路径与 `..`，锁定 `data/workspaces/<session_id>/`）；
+  - `read_file` / `list_dir`：工作区内文件读取与目录列表；
+  - `update_plan`：任务计划回显（前端表格化展示）。
+- **反代模式**：端点配置 `codex_compat: true`（设置页每端点「反代模式 (codex)」开关）——
+  - 跳过 Aurora 自带 system prompt 与 ReAct 文本协议（工具目录/skills 摘要均不注入），保持模型自带 codex 提示词纯净；
+  - 工具以标准 OpenAI function calling（`tools` 数组）下发，原生 `tool_calls` 回填（复用 v1.3 双轨链路）；
+  - 视觉分支同样不注入目录。
+- **桌面模式**（`app/desktop.py`，`python -m app.desktop`）：线程起服（127.0.0.1 随机端口）+ 就绪探测 + pywebview 原生窗口（Windows 走 WebView2，Win10+ 自带）；未装 pywebview 优雅降级为浏览器模式。
+- **Windows 安装器更新**：「Aurora」主入口改为桌面窗口（不开浏览器）；新增「Aurora（浏览器模式）」备用入口；pywebview 打入安装包 site-packages。
+
+### 安全边界
+
+- Codex shell/文件工具全部锁定会话工作区，与沙箱策略同源（`sandbox.yaml`）；
+- `name_exists` 冲突校验覆盖 codex 工具名，避免被自定义工具遮蔽。
+
+### 测试
+
+- 新增 `tests/test_codex_tools.py`（11 项）：patch 解析/应用（含 move 删旧文件）、越权拒绝（绝对路径/`..`/已存在/未找到）、工作区隔离、OpenAI 定义格式、dispatch 路由、名称冲突校验。
+- 测试总数 341 → **352 项**，全部通过。
+
 ## [1.5.0] — 2026-11-07
 
 Windows 原生安装器：向导式安装（许可/目录/快捷方式），内置 Python 运行时免安装依赖，装完即用；自带卸载程序（两级确认：先确认卸载，再询问是否保留用户数据，默认保留）。

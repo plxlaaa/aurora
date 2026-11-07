@@ -61,6 +61,76 @@ class Executor:
             return await self._run_local(code, script=script)
         return ExecResult("", f"未知执行模式: {mode}", -1, mode=mode)
 
+    async def run_shell(self, command: str, *, cwd: str | None = None,
+                        timeout: float | None = None) -> ExecResult:
+        """在 shell 中执行任意命令（codex shell 工具用）。
+
+        sandbox 模式：挂载 cwd 为容器 /workspace，无网络、限额同 sandbox.yaml；
+        local 模式：直接以 cwd 为工作目录在宿主执行。
+        """
+        mode = self._settings.sandbox_mode()
+        timeout = timeout or 60.0
+        if mode == "sandbox":
+            return await self._run_shell_sandbox(command, cwd, timeout)
+        if mode == "local":
+            return await self._run_shell_local(command, cwd, timeout)
+        return ExecResult("", f"未知执行模式: {mode}", -1, mode=mode)
+
+    async def _run_shell_sandbox(self, command: str, cwd: str | None,
+                                 timeout: float) -> ExecResult:
+        d = self._cfg().docker
+        image = d.get("image", "python:3.12-slim")
+        workdir = d.get("workdir", "/workspace")
+        network = d.get("network", "none")
+        read_only = bool(d.get("read_only_rootfs", False))
+        if not cwd:
+            return ExecResult("", "工作区目录未就绪", -1, mode="sandbox")
+        cmd = ["docker", "run", "--rm",
+               "--memory", str(d.get("mem_limit", "512m")),
+               "--cpus", str(int(d.get("cpu_quota", 50000)) / 100000),
+               "--network", network]
+        if read_only:
+            cmd += ["--read-only"]
+        cmd += ["-v", f"{cwd}:{workdir}", "-w", workdir]
+        cmd += [image, "bash", "-lc", command]
+        return await self._exec_proc(cmd, timeout, mode="sandbox")
+
+    async def _run_shell_local(self, command: str, cwd: str | None,
+                               timeout: float) -> ExecResult:
+        if os.name == "nt":
+            argv = [os.environ.get("COMSPEC", "cmd.exe"), "/c", command]
+        else:
+            argv = ["/bin/sh", "-lc", command]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, cwd=cwd or None)
+        except Exception as exc:  # noqa: BLE001
+            return ExecResult("", f"local shell 执行失败: {exc}", -1, mode="local")
+        return await self._wait_proc(proc, timeout, mode="local")
+
+    async def _exec_proc(self, cmd: list[str], timeout: float, *, mode: str) -> ExecResult:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        except FileNotFoundError as exc:
+            return ExecResult("", f"执行器不可用（{exc.filename}）", -1, mode=mode)
+        except Exception as exc:  # noqa: BLE001
+            return ExecResult("", f"执行失败: {exc}", -1, mode=mode)
+        return await self._wait_proc(proc, timeout, mode=mode)
+
+    async def _wait_proc(self, proc, timeout: float, *, mode: str) -> ExecResult:
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return ExecResult("", f"执行超时（>{timeout}s）", -1, timed_out=True, mode=mode)
+        return ExecResult(
+            stdout.decode("utf-8", errors="replace"),
+            stderr.decode("utf-8", errors="replace"),
+            proc.returncode or 0, mode=mode)
+
     # -- sandbox 模式 --
     async def _run_sandbox(self, code: str, *, script: bool) -> ExecResult:
         d = self._cfg().docker

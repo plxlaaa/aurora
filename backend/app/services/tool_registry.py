@@ -22,6 +22,12 @@ logger = logging.getLogger("aiassistant.tools")
 
 BUILTIN_TOOL_NAMES = ("read_skill", "run_skill", "run_code")
 
+
+def codex_names() -> tuple[str, ...]:
+    """Codex 兼容工具名集合（延迟导入避免循环依赖）。"""
+    from app.services.codex_tools import CODEX_TOOL_NAMES
+    return CODEX_TOOL_NAMES
+
 _REACT_INSTRUCTIONS = """\
 # 工具使用说明
 本会话为你注册了可用工具（目录见下）。请遵守以下规则：
@@ -167,7 +173,12 @@ class ToolRegistry:
                 return v
         return ""
 
-    async def dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def dispatch(self, name: str, arguments: dict[str, Any],
+                       session_id: str | None = None) -> dict[str, Any]:
+        if name in codex_names():
+            # Codex 兼容工具链（反代模式专用）：在会话工作区内执行
+            from app.services import codex_tools
+            return await codex_tools.execute(self.executor, name, arguments, session_id)
         if name == "read_skill":
             return self.skills.read_skill(self._arg(arguments, "name", "skill", "skill_name"))
         if name == "run_skill":
@@ -239,7 +250,7 @@ class ToolRegistry:
 
     def name_exists(self, name: str) -> bool:
         """供自定义工具保存时的名称冲突校验。"""
-        if name in BUILTIN_TOOL_NAMES or name.startswith("mcp_"):
+        if name in BUILTIN_TOOL_NAMES or name in codex_names() or name.startswith("mcp_"):
             return True
         if self.skills.get(name) is not None:
             return True
