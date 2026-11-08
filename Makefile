@@ -1,4 +1,4 @@
-VERSION ?= 0.1.1
+VERSION ?= 0.1.2
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w -X github.com/plxlaaa/aurora/internal/version.Version=$(VERSION) -X github.com/plxlaaa/aurora/internal/version.Commit=$(COMMIT) -X github.com/plxlaaa/aurora/internal/version.Date=$(DATE)
