@@ -1,13 +1,17 @@
 # Aurora Windows installer.
 # Usage:
 #   irm https://github.com/plxlaaa/aurora/releases/latest/download/install.ps1 | iex
-#   powershell -ExecutionPolicy Bypass -File install.ps1
+#   $env:AURORA_INSTALL_DIR = "D:\Apps\Aurora"; irm ... | iex
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -InstallDir "D:\Apps\Aurora"
+#   powershell -ExecutionPolicy Bypass -File install.ps1 -Browse
 
 param(
     [string]$Repo = "plxlaaa/aurora",
     [string]$Version = "latest",
     [string]$InstallDir = "",
-    [switch]$NoPath
+    [switch]$NoPath,
+    [switch]$Browse,
+    [switch]$Quiet
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,13 +26,97 @@ function Get-Arch {
     throw "Aurora requires 64-bit Windows"
 }
 
-function Get-InstallDir {
-    if ($InstallDir) { return $InstallDir }
+function Get-DefaultInstallDir {
     $local = $env:LOCALAPPDATA
     if (-not $local) {
         $local = Join-Path $env:USERPROFILE "AppData\Local"
     }
     return Join-Path $local "Programs\Aurora"
+}
+
+function Test-CanPrompt {
+    try {
+        if ([Console]::IsInputRedirected) { return $false }
+    } catch { }
+    try {
+        return [Environment]::UserInteractive -and $Host.Name -ne "ServerRemoteHost"
+    } catch {
+        return $false
+    }
+}
+
+function Select-FolderDialog {
+    param([string]$Description = "Choose Aurora install folder")
+    $picker = {
+        param($desc)
+        Add-Type -AssemblyName System.Windows.Forms | Out-Null
+        $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+        $dialog.Description = $desc
+        $dialog.ShowNewFolderButton = $true
+        $dialog.RootFolder = [Environment+SpecialFolder]::Desktop
+        $result = $dialog.ShowDialog()
+        if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+            return $dialog.SelectedPath
+        }
+        return ""
+    }
+    try {
+        if ([Threading.Thread]::CurrentThread.GetApartmentState() -eq "STA") {
+            return & $picker $Description
+        }
+        $rs = [runspacefactory]::CreateRunspace()
+        $rs.ApartmentState = "STA"
+        $rs.Open()
+        $ps = [powershell]::Create()
+        $ps.Runspace = $rs
+        [void]$ps.AddScript($picker).AddArgument($Description)
+        $out = $ps.Invoke()
+        $ps.Dispose()
+        $rs.Close()
+        if ($out) { return [string]$out[0] }
+    } catch { }
+    return ""
+}
+
+function Read-InstallDir {
+    param([string]$Default)
+    Write-Host ""
+    Write-Host "Install location"
+    Write-Host "  default  $Default"
+    Write-Host "  Enter    use default"
+    Write-Host "  path     type a folder, e.g. D:\Apps\Aurora"
+    Write-Host "  b        open folder picker"
+    $answer = Read-Host "Install to"
+    $answer = $answer.Trim()
+    if ($answer -eq "" -or $answer -eq "y" -or $answer -eq "Y") {
+        return $Default
+    }
+    if ($answer -eq "b" -or $answer -eq "B") {
+        $picked = Select-FolderDialog
+        if ($picked) { return $picked }
+        Write-Host "Folder picker cancelled, using default."
+        return $Default
+    }
+    return $answer
+}
+
+function Get-InstallDir {
+    if ($InstallDir) { return $InstallDir }
+    if ($env:AURORA_INSTALL_DIR) { return $env:AURORA_INSTALL_DIR }
+    $default = Get-DefaultInstallDir
+    if ($Quiet) { return $default }
+    if ($Browse -or -not (Test-CanPrompt)) {
+        Write-Host "Opening folder picker for install location..."
+        $picked = Select-FolderDialog
+        if ($picked) { return $picked }
+        Write-Host "Folder picker cancelled, using default: $default"
+        return $default
+    }
+    try {
+        return Read-InstallDir -Default $default
+    } catch {
+        return $default
+    }
 }
 
 $mirrors = @(
@@ -130,6 +218,9 @@ function Invoke-RaceDownload {
 $arch = Get-Arch
 $asset = "aurora-windows-$arch.zip"
 $dir = Get-InstallDir
+$dir = [Environment]::ExpandEnvironmentVariables($dir)
+$dir = $dir.Trim().Trim('"')
+if (-not $dir) { throw "install directory is empty" }
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 
 Write-Host "Aurora installer"

@@ -3,7 +3,16 @@ set -euo pipefail
 
 REPO="${AURORA_REPO:-plxlaaa/aurora}"
 VERSION="${AURORA_VERSION:-latest}"
-INSTALL_DIR="${AURORA_INSTALL_DIR:-$HOME/.local/bin}"
+DEFAULT_DIR="${HOME}/.local/bin"
+INSTALL_DIR="${AURORA_INSTALL_DIR:-}"
+
+if [ -z "$INSTALL_DIR" ]; then
+  if [ -t 0 ]; then
+    printf "Install to [%s]: " "$DEFAULT_DIR"
+    read -r INSTALL_DIR || true
+  fi
+  INSTALL_DIR="${INSTALL_DIR:-$DEFAULT_DIR}"
+fi
 
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 arch="$(uname -m)"

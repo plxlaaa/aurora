@@ -16,13 +16,29 @@ PowerShell (recommended):
 irm https://github.com/plxlaaa/aurora/releases/latest/download/install.ps1 | iex
 ```
 
+一行安装会弹出文件夹选择框。取消则落到 `%LOCALAPPDATA%\Programs\Aurora`。
+
+在终端里直接跑脚本时，回车用默认路径，输入目录，或输入 `b` 再开选择框。
+
+指定目录：
+
+```powershell
+$env:AURORA_INSTALL_DIR = "D:\Apps\Aurora"
+irm https://github.com/plxlaaa/aurora/releases/latest/download/install.ps1 | iex
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install.ps1 -InstallDir "D:\Apps\Aurora"
+powershell -ExecutionPolicy Bypass -File install.ps1 -Browse
+```
+
 CMD:
 
 ```cmd
-curl -fsSL https://github.com/plxlaaa/aurora/releases/latest/download/install.cmd -o install.cmd && install.cmd
+curl -fsSL https://github.com/plxlaaa/aurora/releases/latest/download/install.cmd -o install.cmd && install.cmd D:\Apps\Aurora
 ```
 
-The installer races several GitHub download mirrors and keeps the first complete payload. Binary lands in `%LOCALAPPDATA%\Programs\Aurora` and is added to the user PATH.
+The installer races several GitHub download mirrors and keeps the first complete payload. Chosen folder is added to the user PATH.
 
 ## First run
 
