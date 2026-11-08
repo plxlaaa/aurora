@@ -1,0 +1,231 @@
+package tui
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/plxlaaa/aurora/internal/agent"
+	"github.com/plxlaaa/aurora/internal/config"
+	"github.com/plxlaaa/aurora/internal/updater"
+	"github.com/plxlaaa/aurora/internal/version"
+)
+
+const (
+	cReset  = "\033[0m"
+	cDim    = "\033[2m"
+	cCyan   = "\033[36m"
+	cGreen  = "\033[32m"
+	cYellow = "\033[33m"
+	cRed    = "\033[31m"
+	cBold   = "\033[1m"
+)
+
+func Banner(cfg config.Config, workspace string) {
+	fmt.Printf("%s%sAurora%s %s  terminal coding agent\n", cBold, cCyan, cReset, version.Short())
+	fmt.Printf("%smodel%s %s  %sprovider%s %s\n", cDim, cReset, cfg.LLM.Model, cDim, cReset, cfg.LLM.Provider)
+	fmt.Printf("%sworkspace%s %s\n", cDim, cReset, workspace)
+	fmt.Printf("%stype a task, /help for commands, Ctrl+C to exit%s\n\n", cDim, cReset)
+}
+
+func Help() {
+	fmt.Print(`
+commands
+  /help              show this help
+  /status            session, model, workspace
+  /model <name>      switch model for this session
+  /cd <path>         change workspace and reset session
+  /reset             clear conversation memory
+  /compact           keep recent turns only
+  /yolo              skip shell confirmation this session
+  /update            check and apply local update
+  /config            print config path
+  /quit              exit
+
+plain text is sent to the agent. conversation memory is kept until /reset.
+
+`)
+}
+
+func Confirm(in *bufio.Reader, command string) bool {
+	fmt.Printf("%srun shell?%s %s\n[y/N] ", cYellow, cReset, command)
+	line, _ := in.ReadString('\n')
+	line = strings.TrimSpace(strings.ToLower(line))
+	return line == "y" || line == "yes"
+}
+
+type Session struct {
+	Cfg       config.Config
+	Workspace string
+	Runner    *agent.Runner
+	Reader    *bufio.Reader
+	Yolo      bool
+}
+
+func (s *Session) rebuild() error {
+	ws := s.Workspace
+	r, err := agent.New(s.Cfg, ws, func(cmd string) bool {
+		if s.Yolo {
+			return true
+		}
+		return Confirm(s.Reader, cmd)
+	})
+	if err != nil {
+		return err
+	}
+	s.Runner = r
+	s.attach()
+	return nil
+}
+
+func (s *Session) attach() {
+	s.Runner.On = func(ev agent.Event) {
+		switch ev.Kind {
+		case "delta":
+			fmt.Print(ev.Text)
+		case "tool":
+			fmt.Printf("\n%s▸ %s%s %s\n", cYellow, ev.Name, cReset, cDim+trim(ev.Text, 120)+cReset)
+		case "tool_result":
+			color := cGreen
+			if !ev.OK {
+				color = cRed
+			}
+			fmt.Printf("%s%s%s\n", color, trim(ev.Text, 400), cReset)
+		case "done":
+			if !strings.HasSuffix(ev.Text, "\n") {
+				fmt.Println()
+			}
+		}
+	}
+}
+
+func RunREPL(ctx context.Context, cfg config.Config, workspace string, in io.Reader, updateFn func() error) error {
+	EnableColor()
+	if workspace == "" {
+		workspace, _ = os.Getwd()
+	}
+	abs, err := filepath.Abs(workspace)
+	if err == nil {
+		workspace = abs
+	}
+	reader := bufio.NewReader(in)
+	s := &Session{Cfg: cfg, Workspace: workspace, Reader: reader}
+	if err := s.rebuild(); err != nil {
+		return err
+	}
+	Banner(cfg, workspace)
+	hintUpdate(cfg)
+
+	for {
+		fmt.Printf("%s>%s ", cCyan, cReset)
+		line, err := reader.ReadString('\n')
+		if err == io.EOF {
+			fmt.Println()
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		switch {
+		case line == "/help":
+			Help()
+		case line == "/quit" || line == "/exit":
+			return nil
+		case line == "/config":
+			p, _ := config.Path()
+			fmt.Println(p)
+		case line == "/status":
+			fmt.Printf("version %s\nmodel %s\nworkspace %s\nyolo %v\n", version.Short(), s.Cfg.LLM.Model, s.Workspace, s.Yolo)
+		case line == "/reset" || line == "/clear":
+			s.Runner.Reset()
+			fmt.Println("session cleared")
+		case line == "/compact":
+			s.Runner.Compact()
+			fmt.Println("session compacted")
+		case line == "/yolo":
+			s.Yolo = !s.Yolo
+			_ = s.rebuild()
+			fmt.Println("yolo =", s.Yolo)
+		case line == "/update":
+			if updateFn == nil {
+				fmt.Println("updater unavailable")
+				continue
+			}
+			if err := updateFn(); err != nil {
+				fmt.Printf("%supdate failed:%s %v\n", cRed, cReset, err)
+			}
+		case strings.HasPrefix(line, "/model "):
+			s.Cfg.LLM.Model = strings.TrimSpace(strings.TrimPrefix(line, "/model "))
+			s.Runner.SetModel(s.Cfg.LLM.Model)
+			fmt.Println("model =", s.Cfg.LLM.Model)
+		case strings.HasPrefix(line, "/cd "):
+			next := strings.TrimSpace(strings.TrimPrefix(line, "/cd "))
+			if next == "" {
+				fmt.Println(s.Workspace)
+				continue
+			}
+			abs, err := filepath.Abs(next)
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
+			st, err := os.Stat(abs)
+			if err != nil || !st.IsDir() {
+				fmt.Println("not a directory:", abs)
+				continue
+			}
+			s.Workspace = abs
+			if err := s.rebuild(); err != nil {
+				fmt.Println(err)
+				continue
+			}
+			fmt.Println("workspace =", s.Workspace)
+		default:
+			_, err := s.Runner.Run(ctx, line)
+			if err != nil {
+				fmt.Printf("%serror:%s %v\n", cRed, cReset, err)
+			}
+			fmt.Println()
+		}
+	}
+}
+
+func hintUpdate(cfg config.Config) {
+	if !cfg.Update.Enabled {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	res, err := updater.Check(ctx, cfg, version.Short(), nil)
+	if err != nil {
+		return
+	}
+	if updater.Newer(res.To, version.Short()) {
+		fmt.Printf("%supdate available %s -> %s  run /update%s\n\n", cDim, version.Short(), res.To, cReset)
+	}
+}
+
+func trim(s string, n int) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
+
+func IsTTY() bool {
+	st, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return st.Mode()&os.ModeCharDevice != 0
+}

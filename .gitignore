@@ -1,0 +1,16 @@
+bin/
+dist/
+tmp/
+*.exe
+*.exe.old
+*.test
+*.out
+coverage.out
+vendor/
+.idea/
+.vscode/
+*.log
+/aurora
+aurora.exe
+.env
+.env.local
