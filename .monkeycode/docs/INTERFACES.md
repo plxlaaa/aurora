@@ -7,6 +7,7 @@
 | `aurora` | 交互 REPL |
 | `aurora <task>` | 单次 Agent 运行 |
 | `aurora init` | 写出默认配置 |
+| `aurora setup` | 交互式首次配置向导（provider/base_url/model/API key） |
 | `aurora config` | 打印配置路径与内容 |
 | `aurora config set k v` | 写入配置字段 |
 | `aurora update` | 本地自更新 |

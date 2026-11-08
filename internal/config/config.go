@@ -107,6 +107,21 @@ func Path() (string, error) {
 	return filepath.Join(dir, "config.json"), nil
 }
 
+func Exists() (bool, error) {
+	p, err := Path()
+	if err != nil {
+		return false, err
+	}
+	_, err = os.Stat(p)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
+}
+
 func InstallDir() (string, error) {
 	if runtime.GOOS == "windows" {
 		base := os.Getenv("LOCALAPPDATA")
@@ -181,6 +196,11 @@ func APIKey(cfg Config) string {
 	env := strings.TrimSpace(cfg.LLM.APIKeyEnv)
 	if env == "" {
 		env = "AURORA_API_KEY"
+	}
+	if store, err := LoadKeyStore(); err == nil {
+		if v := strings.TrimSpace(store[env]); v != "" {
+			return v
+		}
 	}
 	if v := strings.TrimSpace(os.Getenv(env)); v != "" {
 		return v

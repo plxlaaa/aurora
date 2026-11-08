@@ -229,3 +229,11 @@ func IsTTY() bool {
 	}
 	return st.Mode()&os.ModeCharDevice != 0
 }
+
+func IsInteractiveTTY() bool {
+	st, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return st.Mode()&os.ModeCharDevice != 0
+}

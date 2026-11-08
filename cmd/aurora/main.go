@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
 	"github.com/plxlaaa/aurora/internal/agent"
 	"github.com/plxlaaa/aurora/internal/config"
+	"github.com/plxlaaa/aurora/internal/setup"
 	"github.com/plxlaaa/aurora/internal/tui"
 	"github.com/plxlaaa/aurora/internal/updater"
 	"github.com/plxlaaa/aurora/internal/version"
@@ -45,6 +47,8 @@ func run(args []string) error {
 		return nil
 	case "init":
 		return cmdInit()
+	case "setup":
+		return cmdSetup()
 	case "config":
 		return cmdConfig(args[1:])
 	case "update":
@@ -69,6 +73,7 @@ Usage:
   aurora <task>          run one task then exit
   aurora run <task>      same as above
   aurora init            write default config
+  aurora setup           interactive first-run config wizard
   aurora config          show config path and values
   aurora config set k v  set a config field and save
   aurora update          download latest binary via racing mirrors
@@ -91,13 +96,76 @@ func loadCfg() (config.Config, error) {
 	if err != nil {
 		return cfg, err
 	}
+	applyEnvOverrides(&cfg)
+	return cfg, nil
+}
+
+func applyEnvOverrides(cfg *config.Config) {
 	if v := strings.TrimSpace(os.Getenv("AURORA_BASE_URL")); v != "" {
 		cfg.LLM.BaseURL = v
 	}
 	if v := strings.TrimSpace(os.Getenv("AURORA_MODEL")); v != "" {
 		cfg.LLM.Model = v
 	}
-	return cfg, nil
+}
+
+func readStdinLine(reader *bufio.Reader) (string, bool) {
+	line, err := reader.ReadString('\n')
+	eof := err == io.EOF
+	return strings.TrimSpace(line), eof
+}
+
+func runSetupWizard(reader *bufio.Reader) (config.Config, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return cfg, err
+	}
+	res, err := setup.Run(setup.Options{In: reader, Out: os.Stdout, Cfg: cfg})
+	if err != nil {
+		return cfg, err
+	}
+	if err := config.Save(res.Config); err != nil {
+		return cfg, err
+	}
+	if res.KeyName != "" && res.KeyValue != "" {
+		if err := config.SaveKeyStore(res.KeyName, res.KeyValue); err != nil {
+			return cfg, err
+		}
+	}
+	cfgPath, _ := config.Path()
+	keyPath, _ := config.KeyStorePath()
+	setup.PrintSummary(os.Stdout, res, cfgPath, keyPath)
+	return res.Config, nil
+}
+
+func cmdSetup() error {
+	_, err := runSetupWizard(bufio.NewReader(os.Stdin))
+	return err
+}
+
+func offerFirstRunSetup(cfg config.Config, reader *bufio.Reader) (config.Config, error) {
+	exists, err := config.Exists()
+	if err != nil || exists {
+		return cfg, nil
+	}
+	if strings.TrimSpace(os.Getenv("AURORA_API_KEY")) != "" || strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) != "" {
+		return cfg, nil
+	}
+	if !tui.IsInteractiveTTY() {
+		return cfg, nil
+	}
+	fmt.Print("aurora: no config found yet. run setup now? [Y/n] ")
+	line, eof := readStdinLine(reader)
+	if eof && line == "" {
+		return cfg, nil
+	}
+	switch strings.ToLower(line) {
+	case "", "y", "yes":
+		return runSetupWizard(reader)
+	default:
+		fmt.Println("skipping setup; run 'aurora setup' any time")
+		return cfg, nil
+	}
 }
 
 func cmdInit() error {
@@ -149,9 +217,17 @@ func cmdDoctor() error {
 	fmt.Println("  model     ", cfg.LLM.Model)
 	fmt.Println("  base_url  ", cfg.LLM.BaseURL)
 	if config.APIKey(cfg) == "" {
-		fmt.Println("  api_key    missing (" + cfg.LLM.APIKeyEnv + " or OPENAI_API_KEY)")
+		fmt.Println("  api_key    missing (" + cfg.LLM.APIKeyEnv + ", key store, or OPENAI_API_KEY)")
 	} else {
 		fmt.Println("  api_key    present")
+	}
+	if kp, err := config.KeyStorePath(); err == nil {
+		store, _ := config.LoadKeyStore()
+		if strings.TrimSpace(store[cfg.LLM.APIKeyEnv]) != "" {
+			fmt.Println("  key_store ", kp, "("+cfg.LLM.APIKeyEnv+" set)")
+		} else {
+			fmt.Println("  key_store ", kp, "(empty)")
+		}
 	}
 	if exe != "" {
 		if st, err := os.Stat(updater.NewPath(exe)); err == nil && !st.IsDir() {
@@ -208,12 +284,17 @@ func cmdRun(prompt string) error {
 	if prompt == "" {
 		return fmt.Errorf("empty prompt")
 	}
-	cfg, err := loadCfg()
+	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
+	applyEnvOverrides(&cfg)
 	wd, _ := os.Getwd()
 	reader := bufio.NewReader(os.Stdin)
+	cfg, err = offerFirstRunSetup(cfg, reader)
+	if err != nil {
+		return err
+	}
 	r, err := agent.New(cfg, wd, func(cmd string) bool {
 		if !cfg.Agent.ConfirmShell {
 			return true
@@ -237,15 +318,21 @@ func cmdRun(prompt string) error {
 }
 
 func cmdREPL(args []string) error {
-	cfg, err := loadCfg()
-	if err != nil {
-		return err
-	}
 	wd, _ := os.Getwd()
 	if len(args) > 0 {
 		return cmdRun(strings.Join(args, " "))
 	}
-	return tui.RunREPL(context.Background(), cfg, wd, os.Stdin, func() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	applyEnvOverrides(&cfg)
+	reader := bufio.NewReader(os.Stdin)
+	cfg, err = offerFirstRunSetup(cfg, reader)
+	if err != nil {
+		return err
+	}
+	return tui.RunREPL(context.Background(), cfg, wd, reader, func() error {
 		return cmdUpdate(nil)
 	})
 }

@@ -43,6 +43,15 @@ The installer races several GitHub download mirrors and keeps the first complete
 ## First run
 
 ```powershell
+aurora setup
+aurora
+```
+
+`aurora setup` runs an interactive wizard: pick a provider preset (OpenAI / DeepSeek / Zhipu GLM / Moonshot Kimi / MiniMax / Ollama / custom endpoint), accept or edit the base URL and model, paste your API key. The key is written to `%APPDATA%\aurora\.env` (owner-only file) and the config only records the variable name. The wizard ends with an optional connection test. On first launch without a config file, Aurora offers the wizard automatically.
+
+Prefer environment variables:
+
+```powershell
 $env:AURORA_API_KEY = "sk-..."
 aurora init
 aurora
@@ -71,6 +80,8 @@ aurora update --check
 ```
 aurora                 interactive REPL
 aurora <task>          one-shot agent run
+aurora setup           interactive first-run config wizard
+aurora init            write default config
 aurora update          local self-update
 aurora doctor          install / PATH / channel diagnostics
 aurora version

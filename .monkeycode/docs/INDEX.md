@@ -31,8 +31,14 @@ Aurora 是一个 Windows 优先的终端 AI 编程助手（CLI Agent），目标
 - **描述**: `irm ... \| iex`，写入 `%LOCALAPPDATA%\Programs\Aurora` 并加入用户 PATH
 
 ### 本地多渠道更新
+
 - **目的**: 不依赖商店，直接替换本地二进制
 - **描述**: 并行拉取 manifest 与 zip，最快成功渠道胜出
+
+### 首次配置向导
+
+- **目的**: 新用户零手工编辑即可跑通模型
+- **描述**: `aurora setup` 分步选择 provider/base_url/model/API key；Key 写入配置目录 `.env`，配置只记变量名；首次启动无配置时自动提示
 
 ## 文档导航
 
