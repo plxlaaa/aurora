@@ -121,9 +121,9 @@ function Get-InstallDir {
 
 $mirrors = @(
     @{ Name = "github"; Wrap = { param($u) $u } },
+    @{ Name = "gh_proxy_com"; Wrap = { param($u) "https://gh-proxy.com/$u" } },
+    @{ Name = "ghfast_top"; Wrap = { param($u) "https://ghfast.top/$u" } },
     @{ Name = "ghproxy_net"; Wrap = { param($u) "https://ghproxy.net/$u" } },
-    @{ Name = "ghproxy"; Wrap = { param($u) "https://mirror.ghproxy.com/$u" } },
-    @{ Name = "gitdl"; Wrap = { param($u) "https://gitdl.cn/$u" } },
     @{ Name = "gh_ddlc"; Wrap = { param($u) "https://gh.ddlc.top/$u" } }
 )
 

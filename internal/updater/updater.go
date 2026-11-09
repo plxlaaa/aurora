@@ -50,7 +50,7 @@ func Check(ctx context.Context, cfg config.Config, current string, progress Prog
 	start := time.Now()
 	timeout := time.Duration(cfg.Update.TimeoutMS) * time.Millisecond
 	if timeout <= 0 {
-		timeout = 20 * time.Second
+		timeout = 60 * time.Second
 	}
 	man, src, err := fetchManifest(ctx, cfg, timeout, progress)
 	if err != nil {
@@ -82,7 +82,7 @@ func CheckAndApply(ctx context.Context, cfg config.Config, current string, force
 	}
 	timeout := time.Duration(cfg.Update.TimeoutMS) * time.Millisecond
 	if timeout <= 0 {
-		timeout = 20 * time.Second
+		timeout = 60 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout+30*time.Second)
 	defer cancel()
@@ -110,7 +110,14 @@ func CheckAndApply(ctx context.Context, cfg config.Config, current string, force
 	emit("download", fmt.Sprintf("racing %d channels for %s", len(urls), asset.Name))
 	tmp, channel, err := raceDownload(ctx, urls, timeout, emit)
 	if err != nil {
-		return Result{}, err
+		hint := ""
+		if p, perr := config.Path(); perr == nil {
+			hint = " or edit " + p + " update.mirrors/update.timeout_ms"
+		}
+		return Result{}, fmt.Errorf(
+			"%w; download manually from https://github.com/%s/releases/latest%s",
+			err, cfg.Update.Repo, hint,
+		)
 	}
 	defer os.Remove(tmp)
 	if asset.SHA256 != "" {
@@ -323,6 +330,10 @@ func raceDownload(ctx context.Context, urls []namedURL, timeout time.Duration, e
 		u := u
 		go func() {
 			path, err := downloadToTemp(child, u.URL)
+			if err == nil && !validZip(path) {
+				os.Remove(path)
+				err = errors.New("payload is not a zip (proxy returned html?)")
+			}
 			if err != nil {
 				ch <- hit{name: u.Name, err: err}
 				return
@@ -363,6 +374,15 @@ func raceDownload(ctx context.Context, urls []namedURL, timeout time.Duration, e
 		return "", "", last
 	}
 	return winnerPath, winner, nil
+}
+
+func validZip(path string) bool {
+	r, err := zip.OpenReader(path)
+	if err != nil {
+		return false
+	}
+	_ = r.Close()
+	return true
 }
 
 func downloadToTemp(ctx context.Context, rawURL string) (string, error) {

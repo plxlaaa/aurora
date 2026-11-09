@@ -14,11 +14,12 @@ type Channel struct {
 func DefaultChannels() []Channel {
 	return []Channel{
 		{Name: "github", Wrap: identity},
+		{Name: "gh_proxy_com", Wrap: prefix("https://gh-proxy.com/")},
+		{Name: "ghfast_top", Wrap: prefix("https://ghfast.top/")},
 		{Name: "ghproxy_net", Wrap: prefix("https://ghproxy.net/")},
+		{Name: "gh_ddlc", Wrap: prefix("https://gh.ddlc.top/")},
 		{Name: "ghproxy", Wrap: prefix("https://mirror.ghproxy.com/")},
 		{Name: "gitdl", Wrap: prefix("https://gitdl.cn/")},
-		{Name: "gh_ddlc", Wrap: prefix("https://gh.ddlc.top/")},
-		{Name: "ghproxy_cc", Wrap: prefix("https://ghproxy.cc/")},
 	}
 }
 
@@ -63,8 +64,8 @@ func GitHubLatestAPI(repo string) []string {
 	api := "https://api.github.com/repos/" + repo + "/releases/latest"
 	return []string{
 		api,
-		"https://ghproxy.net/" + api,
-		"https://mirror.ghproxy.com/" + api,
+		"https://gh-proxy.com/" + api,
+		"https://ghfast.top/" + api,
 	}
 }
 

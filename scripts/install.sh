@@ -31,9 +31,9 @@ fi
 
 mirrors=(
   "$raw"
+  "https://gh-proxy.com/$raw"
+  "https://ghfast.top/$raw"
   "https://ghproxy.net/$raw"
-  "https://mirror.ghproxy.com/$raw"
-  "https://gitdl.cn/$raw"
   "https://gh.ddlc.top/$raw"
 )
 
@@ -42,7 +42,7 @@ trap 'rm -rf "$tmp"' EXIT
 ok=0
 for url in "${mirrors[@]}"; do
   echo "try $url"
-  if curl -fsSL --max-time 20 "$url" -o "$tmp/$asset"; then
+  if curl -fsSL --max-time 60 "$url" -o "$tmp/$asset"; then
     ok=1
     break
   fi

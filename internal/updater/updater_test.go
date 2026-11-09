@@ -2,6 +2,7 @@ package updater
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -44,14 +45,69 @@ func TestParseVer(t *testing.T) {
 	}
 }
 
+func TestRaceDownloadRejectsNonZipPayload(t *testing.T) {
+	poison := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte("<html><head><title>Loading...</title></head></html>"))
+	}))
+	defer poison.Close()
+
+	var zipBuf bytes.Buffer
+	zw := zip.NewWriter(&zipBuf)
+	_, err := zw.Create("aurora.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	real := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		w.Write(zipBuf.Bytes())
+	}))
+	defer real.Close()
+
+	ctx := context.Background()
+	path, name, err := raceDownload(ctx, []namedURL{
+		{Name: "poison", URL: poison.URL},
+		{Name: "real", URL: real.URL},
+	}, 5*time.Second, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path)
+	if name != "real" {
+		t.Fatalf("winner = %s, want real (poison must be rejected)", name)
+	}
+}
+
+func zipPayload(t *testing.T, body string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("aurora.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
 func TestRaceDownloadPrefersFastChannel(t *testing.T) {
+	slowBody := zipPayload(t, "slow-body")
+	fastBody := zipPayload(t, "fast-body")
 	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(400 * time.Millisecond)
-		w.Write([]byte("slow-body"))
+		w.Write(slowBody)
 	}))
 	defer slow.Close()
 	fast := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("fast-body"))
+		w.Write(fastBody)
 	}))
 	defer fast.Close()
 
@@ -68,8 +124,8 @@ func TestRaceDownloadPrefersFastChannel(t *testing.T) {
 		t.Fatalf("winner = %s, want fast", name)
 	}
 	raw, _ := os.ReadFile(path)
-	if string(raw) != "fast-body" {
-		t.Fatalf("body = %q", raw)
+	if string(raw) != string(fastBody) {
+		t.Fatalf("body mismatch")
 	}
 }
 

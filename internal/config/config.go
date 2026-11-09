@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -48,17 +49,11 @@ func Default() Config {
 			APIKeyEnv: "AURORA_API_KEY",
 		},
 		Update: UpdateConfig{
-			Enabled:     true,
-			ChannelRace: true,
-			TimeoutMS:   20000,
-			Repo:        "plxlaaa/aurora",
-			Mirrors: []string{
-				"github",
-				"ghproxy",
-				"ghproxy_net",
-				"gitdl",
-				"gh_ddlc",
-			},
+			Enabled:      true,
+			ChannelRace:  true,
+			TimeoutMS:    60000,
+			Repo:         "plxlaaa/aurora",
+			Mirrors:      DefaultMirrors(),
 			ManifestURLs: DefaultManifestURLs("plxlaaa/aurora"),
 		},
 		Agent: AgentConfig{
@@ -69,13 +64,80 @@ func Default() Config {
 	}
 }
 
+const DefaultKeyEnv = "AURORA_API_KEY"
+
+const retiredDefaultTimeoutMS = 20000
+
+var retiredMirrors = map[string]bool{
+	"gitdl":      true,
+	"ghproxy":    true,
+	"ghproxy_cc": true,
+}
+
+var retiredManifestPrefixes = []string{
+	"gitdl.cn",
+	"mirror.ghproxy.com",
+}
+
+func hasRetiredManifestURL(urls []string) bool {
+	for _, u := range urls {
+		for _, dead := range retiredManifestPrefixes {
+			if strings.Contains(u, dead) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func DefaultMirrors() []string {
+	return []string{
+		"github",
+		"gh_proxy_com",
+		"ghfast_top",
+		"ghproxy_net",
+		"gh_ddlc",
+	}
+}
+
+func healMirrors(mirrors []string) []string {
+	out := sanitizeMirrors(mirrors)
+	if len(out) == 0 {
+		return DefaultMirrors()
+	}
+	seen := map[string]bool{}
+	for _, m := range out {
+		seen[m] = true
+	}
+	for _, m := range DefaultMirrors() {
+		if !seen[m] {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func sanitizeMirrors(mirrors []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(mirrors))
+	for _, m := range mirrors {
+		m = strings.ToLower(strings.TrimSpace(m))
+		if m == "" || retiredMirrors[m] || seen[m] {
+			continue
+		}
+		seen[m] = true
+		out = append(out, m)
+	}
+	return out
+}
+
 func DefaultManifestURLs(repo string) []string {
 	base := "https://github.com/" + repo + "/releases/latest/download/manifest.json"
 	return []string{
 		base,
+		"https://gh-proxy.com/" + base,
+		"https://ghfast.top/" + base,
 		"https://ghproxy.net/" + base,
-		"https://mirror.ghproxy.com/" + base,
-		"https://gitdl.cn/" + base,
 		"https://gh.ddlc.top/" + base,
 	}
 }
@@ -158,10 +220,14 @@ func Load() (Config, error) {
 		return cfg, fmt.Errorf("parse config: %w", err)
 	}
 	if cfg.LLM.APIKeyEnv == "" {
-		cfg.LLM.APIKeyEnv = "AURORA_API_KEY"
+		cfg.LLM.APIKeyEnv = DefaultKeyEnv
 	}
-	if cfg.Update.TimeoutMS <= 0 {
-		cfg.Update.TimeoutMS = 20000
+	if cfg.Update.TimeoutMS <= 0 || cfg.Update.TimeoutMS == retiredDefaultTimeoutMS {
+		cfg.Update.TimeoutMS = 60000
+	}
+	cfg.Update.Mirrors = healMirrors(cfg.Update.Mirrors)
+	if len(cfg.Update.ManifestURLs) == 0 || hasRetiredManifestURL(cfg.Update.ManifestURLs) {
+		cfg.Update.ManifestURLs = DefaultManifestURLs(cfg.Update.Repo)
 	}
 	if cfg.Agent.MaxSteps <= 0 {
 		cfg.Agent.MaxSteps = 32
@@ -195,7 +261,7 @@ func Save(cfg Config) error {
 func APIKey(cfg Config) string {
 	env := strings.TrimSpace(cfg.LLM.APIKeyEnv)
 	if env == "" {
-		env = "AURORA_API_KEY"
+		env = DefaultKeyEnv
 	}
 	if store, err := LoadKeyStore(); err == nil {
 		if v := strings.TrimSpace(store[env]); v != "" {
@@ -236,6 +302,19 @@ func SetField(cfg *Config, key, value string) error {
 		cfg.Agent.ConfirmShell = value == "1" || strings.EqualFold(value, "true") || strings.EqualFold(value, "yes")
 	case "update.repo", "repo":
 		cfg.Update.Repo = value
+	case "update.timeout_ms", "timeout_ms":
+		n, err := strconv.Atoi(value)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("timeout_ms must be a positive integer")
+		}
+		cfg.Update.TimeoutMS = n
+	case "update.mirrors", "mirrors":
+		cfg.Update.Mirrors = sanitizeMirrors(strings.FieldsFunc(value, func(r rune) bool {
+			return r == ',' || r == ' ' || r == '\t' || r == ';'
+		}))
+		if len(cfg.Update.Mirrors) == 0 {
+			return fmt.Errorf("mirrors must name at least one channel")
+		}
 	default:
 		return fmt.Errorf("unknown config key %s", key)
 	}
