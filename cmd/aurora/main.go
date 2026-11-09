@@ -310,9 +310,15 @@ func cmdRun(prompt string) error {
 			fmt.Print(ev.Text)
 		case "tool":
 			fmt.Printf("\n▸ %s\n", ev.Name)
+		case "tool_result":
+			color := "ok"
+			if !ev.OK {
+				color = "failed"
+			}
+			fmt.Printf("  (%s)\n", color)
 		}
 	}
-	_, err = r.Run(context.Background(), prompt)
+	_, _, err = r.Run(context.Background(), prompt)
 	fmt.Println()
 	return err
 }

@@ -40,6 +40,11 @@ Aurora 是一个 Windows 优先的终端 AI 编程助手（CLI Agent），目标
 - **目的**: 新用户零手工编辑即可跑通模型
 - **描述**: `aurora setup` 分步选择 provider/base_url/model/API key；Key 写入配置目录 `.env`，配置只记变量名；首次启动无配置时自动提示
 
+### 富终端 UI（v0.2.0）
+
+- **目的**: 对齐 Codex/Claude Code 的终端体验
+- **描述**: spinner 动词轮换 + Ctrl+C 取消回合；工具卡片与彩色 diff；markdown-lite 渲染；token 用量追踪（`/usage`、`/status`）；全部零依赖实现
+
 ## 文档导航
 
 - 当前工作区 `/ .monkeycode/docs/ARCHITECTURE.md` - 架构设计

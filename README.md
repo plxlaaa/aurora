@@ -87,9 +87,21 @@ aurora doctor          install / PATH / channel diagnostics
 aurora version
 ```
 
-REPL extras: `/help` `/status` `/model` `/cd` `/reset` `/compact` `/yolo` `/update` `/quit`
+REPL extras: `/help` `/status` `/usage` `/model` `/cd` `/reset` `/compact` `/yolo` `/update` `/quit`
 
 Conversation memory is kept across turns until `/reset`. `aurora config set model <name>` writes `%APPDATA%\aurora\config.json`.
+
+## Terminal UI
+
+The REPL renders like modern coding agents:
+
+- Spinner with rotating verbs and elapsed seconds while the model thinks, `Ctrl+C` cancels the running turn (press again when idle to exit)
+- Tool cards: one line per call, e.g. `⏺ Write(src/demo.txt)` with a compact result line
+- File edits show colored diffs (`-` red / `+` green), capped long diffs
+- Assistant replies render markdown-lite: headings, bold, inline code, bullets, fenced code blocks
+- `/usage` shows prompt/completion/total tokens for the session and the last step; `/status` includes session totals
+
+Usage reporting uses `stream_options.include_usage` on every streaming request; endpoints without usage support show `n/a`.
 
 ## Build
 

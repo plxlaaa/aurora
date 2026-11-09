@@ -23,6 +23,7 @@ import (
 type Result struct {
 	OK      bool   `json:"ok"`
 	Content string `json:"content"`
+	Diff    string `json:"-"`
 }
 
 type Registry struct {
@@ -227,10 +228,24 @@ func (r *Registry) writeFile(path, content string) Result {
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return fail(err.Error())
 	}
+	prev := ""
+	created := true
+	if raw, err := os.ReadFile(abs); err == nil {
+		prev = string(raw)
+		created = false
+	}
 	if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
 		return fail(err.Error())
 	}
-	return ok("wrote " + abs)
+	res := ok("wrote " + abs)
+	if created {
+		res.Content = fmt.Sprintf("created %s (%d lines)", abs, len(splitLines(content)))
+		res.Diff = Diff("", content)
+	} else {
+		res.Content = fmt.Sprintf("wrote %s (%d lines)", abs, len(splitLines(content)))
+		res.Diff = Diff(prev, content)
+	}
+	return res
 }
 
 func (r *Registry) editFile(path, oldS, newS string, replaceAll bool) Result {
@@ -260,7 +275,10 @@ func (r *Registry) editFile(path, oldS, newS string, replaceAll bool) Result {
 	if err := os.WriteFile(abs, []byte(out), 0o644); err != nil {
 		return fail(err.Error())
 	}
-	return ok(fmt.Sprintf("updated %s (%d replacement)", abs, map[bool]int{true: count, false: 1}[replaceAll]))
+	replacements := map[bool]int{true: count, false: 1}[replaceAll]
+	res := ok(fmt.Sprintf("updated %s (%d replacement)", abs, replacements))
+	res.Diff = Diff(src, out)
+	return res
 }
 
 func (r *Registry) listDir(path string) Result {

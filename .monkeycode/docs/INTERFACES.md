@@ -40,9 +40,9 @@
   "update": {
     "enabled": true,
     "channel_race": true,
-    "timeout_ms": 20000,
+    "timeout_ms": 60000,
     "repo": "plxlaaa/aurora",
-    "mirrors": ["github", "ghproxy", "ghproxy_net", "gitdl", "gh_ddlc"]
+    "mirrors": ["github", "gh_proxy_com", "ghfast_top", "ghproxy_net", "gh_ddlc"]
   },
   "agent": {
     "max_steps": 32,
@@ -67,6 +67,54 @@
 路径必须落在工作区根目录内。`*.go` 只匹配当前层，`**/*.go` 才递归。
 
 REPL 会话在 `/reset` 之前保留对话记忆。`/yolo` 跳过 shell 确认。Windows 更新若锁住 `aurora.exe`，下次启动会从 `aurora.exe.new` 完成替换。
+
+## 内部接口（v0.2）
+
+### agent
+
+```go
+type Event struct {
+    Kind  string    // step | delta | tool | tool_result | usage | done | turn_end
+    Name  string    // 工具名（tool/tool_result）
+    Text  string    // 流式增量 / 工具参数 / 工具结果
+    OK    bool      // tool_result 成败
+    Diff  string    // tool_result 附带的行级 diff（write/edit）
+    Usage llm.Usage // usage 事件的单步用量
+}
+
+Runner.Run(ctx, input) (final string, turnUsage llm.Usage, err error)
+Runner.SessionUsage() / LastUsage()  // 会话累计与单步用量
+Runner.Messages()  // 当前消息条数
+```
+
+### llm
+
+```go
+type Usage struct { Prompt, Completion, Total int64 }
+ChatStream(ctx, msgs, tools, onDelta) (Message, Usage, error)  // 请求带 stream_options.include_usage
+Chat(ctx, msgs, tools) (Message, Usage, error)
+```
+
+### tools
+
+```go
+type Result struct {
+    OK      bool   `json:"ok"`
+    Content string `json:"content"`
+    Diff    string `json:"-"` // 仅 UI 展示，不进 LLM 上下文
+}
+tools.Diff(old, new string) string  // 行级 LCS diff，±行 + 2 行上下文，60 行截断
+```
+
+### tui
+
+| 文件 | 职责 |
+|------|------|
+| `output.go` | printer：全局输出互斥 + ClearLine |
+| `spinner.go` | braille spinner：动词池轮换 + 计时 + Ctrl+C 提示，仅 TTY |
+| `markdown.go` | 行缓冲 markdown-lite：标题/加粗/行内代码/列表/围栏 |
+| `cards.go` | 工具卡片 `⏺ Tool(arg)`、结果行 `⎿`、diff 着色（40 行截断） |
+| `repl.go` | REPL、事件接线、`/usage`、Ctrl+C 语义（回合中取消，空闲退出） |
 
 ## 更新 Manifest
 

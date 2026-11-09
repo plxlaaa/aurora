@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,7 +39,8 @@ func Help() {
 	fmt.Print(`
 commands
   /help              show this help
-  /status            session, model, workspace
+  /status            session, model, workspace, tokens
+  /usage             token usage for session and last step
   /model <name>      switch model for this session
   /cd <path>         change workspace and reset session
   /reset             clear conversation memory
@@ -65,6 +68,23 @@ type Session struct {
 	Runner    *agent.Runner
 	Reader    *bufio.Reader
 	Yolo      bool
+	rich      bool
+	out       *printer
+	spin      *spinner
+	buf       *lineBuffer
+}
+
+func newSession(cfg config.Config, workspace string, reader *bufio.Reader) *Session {
+	s := &Session{
+		Cfg:       cfg,
+		Workspace: workspace,
+		Reader:    reader,
+		rich:      IsTTY(),
+	}
+	s.out = newPrinter(os.Stdout)
+	s.spin = newSpinner(s.out)
+	s.buf = &lineBuffer{rich: s.rich}
+	return s
 }
 
 func (s *Session) rebuild() error {
@@ -86,22 +106,66 @@ func (s *Session) rebuild() error {
 func (s *Session) attach() {
 	s.Runner.On = func(ev agent.Event) {
 		switch ev.Kind {
+		case "step":
+			s.spin.Start()
 		case "delta":
-			fmt.Print(ev.Text)
+			s.spin.Stop()
+			s.buf.Feed(ev.Text, s.out)
 		case "tool":
-			fmt.Printf("\n%s▸ %s%s %s\n", cYellow, ev.Name, cReset, cDim+trim(ev.Text, 120)+cReset)
+			s.spin.Stop()
+			if s.rich {
+				s.out.Printf("\n%s\n", toolCard(ev.Name, ev.Text))
+			} else {
+				s.out.Printf("\n%s▸ %s%s %s\n", cYellow, ev.Name, cReset, cDim+trim(ev.Text, 120)+cReset)
+			}
 		case "tool_result":
-			color := cGreen
-			if !ev.OK {
-				color = cRed
+			if s.rich {
+				s.out.Printf("%s\n", toolResultLine(ev.OK, ev.Text))
+				if ev.Diff != "" {
+					s.out.Printf("%s\n", renderDiff(ev.Diff))
+				}
+			} else {
+				color := cGreen
+				if !ev.OK {
+					color = cRed
+				}
+				s.out.Printf("%s%s%s\n", color, trim(ev.Text, 400), cReset)
 			}
-			fmt.Printf("%s%s%s\n", color, trim(ev.Text, 400), cReset)
 		case "done":
-			if !strings.HasSuffix(ev.Text, "\n") {
-				fmt.Println()
+			s.buf.Flush(s.out)
+			if ev.Text != "" && !strings.HasSuffix(ev.Text, "\n") {
+				s.out.Print("\n")
 			}
+		case "turn_end":
+			s.spin.Stop()
 		}
 	}
+}
+
+func (s *Session) runTurn(ctx context.Context, line string) {
+	s.buf.Reset()
+	turnCtx, stop := signal.NotifyContext(ctx, os.Interrupt)
+	defer stop()
+	_, _, err := s.Runner.Run(turnCtx, line)
+	s.spin.Stop()
+	if err != nil {
+		if turnCtx.Err() != nil {
+			s.out.Printf("%sturn cancelled%s\n", cYellow, cReset)
+		} else {
+			s.out.Printf("%serror:%s %v\n", cRed, cReset, err)
+		}
+	}
+	s.out.Print("\n")
+}
+
+func fmtTokens(n int64) string {
+	if n <= 0 {
+		return "n/a"
+	}
+	if n < 1000 {
+		return strconv.FormatInt(n, 10)
+	}
+	return fmt.Sprintf("%.1fk", float64(n)/1000)
 }
 
 func RunREPL(ctx context.Context, cfg config.Config, workspace string, in io.Reader, updateFn func() error) error {
@@ -114,7 +178,7 @@ func RunREPL(ctx context.Context, cfg config.Config, workspace string, in io.Rea
 		workspace = abs
 	}
 	reader := bufio.NewReader(in)
-	s := &Session{Cfg: cfg, Workspace: workspace, Reader: reader}
+	s := newSession(cfg, workspace, reader)
 	if err := s.rebuild(); err != nil {
 		return err
 	}
@@ -122,7 +186,7 @@ func RunREPL(ctx context.Context, cfg config.Config, workspace string, in io.Rea
 	hintUpdate(cfg)
 
 	for {
-		fmt.Printf("%s>%s ", cCyan, cReset)
+		s.out.Printf("%s>%s ", cCyan, cReset)
 		line, err := reader.ReadString('\n')
 		if err == io.EOF {
 			fmt.Println()
@@ -144,7 +208,17 @@ func RunREPL(ctx context.Context, cfg config.Config, workspace string, in io.Rea
 			p, _ := config.Path()
 			fmt.Println(p)
 		case line == "/status":
-			fmt.Printf("version %s\nmodel %s\nworkspace %s\nyolo %v\n", version.Short(), s.Cfg.LLM.Model, s.Workspace, s.Yolo)
+			u := s.Runner.SessionUsage()
+			s.out.Printf("version %s\nmodel %s\nworkspace %s\nyolo %v\nturns %d  messages %d\ntokens session %s\n",
+				version.Short(), s.Cfg.LLM.Model, s.Workspace, s.Yolo,
+				s.Runner.Turns(), s.Runner.Messages(), fmtTokens(u.Total))
+		case line == "/usage":
+			u := s.Runner.SessionUsage()
+			last := s.Runner.LastUsage()
+			s.out.Printf("%ssession%s  prompt %s  completion %s  total %s\n",
+				cDim, cReset, fmtTokens(u.Prompt), fmtTokens(u.Completion), fmtTokens(u.Total))
+			s.out.Printf("%slast%s     prompt %s  completion %s  total %s\n",
+				cDim, cReset, fmtTokens(last.Prompt), fmtTokens(last.Completion), fmtTokens(last.Total))
 		case line == "/reset" || line == "/clear":
 			s.Runner.Reset()
 			fmt.Println("session cleared")
@@ -190,11 +264,7 @@ func RunREPL(ctx context.Context, cfg config.Config, workspace string, in io.Rea
 			}
 			fmt.Println("workspace =", s.Workspace)
 		default:
-			_, err := s.Runner.Run(ctx, line)
-			if err != nil {
-				fmt.Printf("%serror:%s %v\n", cRed, cReset, err)
-			}
-			fmt.Println()
+			s.runTurn(ctx, line)
 		}
 	}
 }

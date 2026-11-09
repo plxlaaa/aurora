@@ -77,13 +77,36 @@ func New(baseURL, apiKey, model string) *Client {
 	}
 }
 
+type Usage struct {
+	Prompt     int64 `json:"prompt_tokens"`
+	Completion int64 `json:"completion_tokens"`
+	Total      int64 `json:"total_tokens"`
+}
+
+func (u Usage) IsZero() bool {
+	return u.Prompt == 0 && u.Completion == 0 && u.Total == 0
+}
+
+func (u Usage) Add(o Usage) Usage {
+	return Usage{
+		Prompt:     u.Prompt + o.Prompt,
+		Completion: u.Completion + o.Completion,
+		Total:      u.Total + o.Total,
+	}
+}
+
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
+}
+
 type chatRequest struct {
-	Model       string     `json:"model"`
-	Messages    []Message  `json:"messages"`
-	Tools       []ToolSpec `json:"tools,omitempty"`
-	Stream      bool       `json:"stream,omitempty"`
-	MaxTokens   int        `json:"max_tokens,omitempty"`
-	Temperature float64    `json:"temperature,omitempty"`
+	Model         string         `json:"model"`
+	Messages      []Message      `json:"messages"`
+	Tools         []ToolSpec     `json:"tools,omitempty"`
+	Stream        bool           `json:"stream,omitempty"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+	MaxTokens     int            `json:"max_tokens,omitempty"`
+	Temperature   float64        `json:"temperature,omitempty"`
 }
 
 type chatResponse struct {
@@ -91,15 +114,16 @@ type chatResponse struct {
 		Message      Message `json:"message"`
 		FinishReason string  `json:"finish_reason"`
 	} `json:"choices"`
+	Usage *Usage `json:"usage,omitempty"`
 	Error *struct {
 		Message string `json:"message"`
 		Type    string `json:"type"`
 	} `json:"error,omitempty"`
 }
 
-func (c *Client) Chat(ctx context.Context, messages []Message, tools []ToolSpec) (Message, error) {
+func (c *Client) Chat(ctx context.Context, messages []Message, tools []ToolSpec) (Message, Usage, error) {
 	if c.APIKey == "" {
-		return Message{}, fmt.Errorf("missing API key")
+		return Message{}, Usage{}, fmt.Errorf("missing API key")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 180*time.Second)
 	defer cancel()
@@ -110,73 +134,79 @@ func (c *Client) Chat(ctx context.Context, messages []Message, tools []ToolSpec)
 		Temperature: 0.2,
 	})
 	if err != nil {
-		return Message{}, err
+		return Message{}, Usage{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return Message{}, err
+		return Message{}, Usage{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return Message{}, err
+		return Message{}, Usage{}, err
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return Message{}, err
+		return Message{}, Usage{}, err
 	}
 	var parsed chatResponse
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return Message{}, fmt.Errorf("decode llm response: %w (%s)", err, truncate(string(raw), 240))
+		return Message{}, Usage{}, fmt.Errorf("decode llm response: %w (%s)", err, truncate(string(raw), 240))
 	}
 	if parsed.Error != nil && parsed.Error.Message != "" {
-		return Message{}, fmt.Errorf("llm: %s", parsed.Error.Message)
+		return Message{}, Usage{}, fmt.Errorf("llm: %s", parsed.Error.Message)
 	}
 	if resp.StatusCode >= 300 {
-		return Message{}, fmt.Errorf("llm http %d: %s", resp.StatusCode, truncate(string(raw), 240))
+		return Message{}, Usage{}, fmt.Errorf("llm http %d: %s", resp.StatusCode, truncate(string(raw), 240))
 	}
 	if len(parsed.Choices) == 0 {
-		return Message{}, fmt.Errorf("llm returned empty choices")
+		return Message{}, Usage{}, fmt.Errorf("llm returned empty choices")
 	}
-	return parsed.Choices[0].Message, nil
+	usage := Usage{}
+	if parsed.Usage != nil {
+		usage = *parsed.Usage
+	}
+	return parsed.Choices[0].Message, usage, nil
 }
 
-func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []ToolSpec, onDelta func(string)) (Message, error) {
+func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []ToolSpec, onDelta func(string)) (Message, Usage, error) {
 	if c.APIKey == "" {
-		return Message{}, fmt.Errorf("missing API key")
+		return Message{}, Usage{}, fmt.Errorf("missing API key")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 180*time.Second)
 	defer cancel()
 	body, err := json.Marshal(chatRequest{
-		Model:       c.Model,
-		Messages:    messages,
-		Tools:       tools,
-		Stream:      true,
-		Temperature: 0.2,
+		Model:         c.Model,
+		Messages:      messages,
+		Tools:         tools,
+		Stream:        true,
+		StreamOptions: &streamOptions{IncludeUsage: true},
+		Temperature:   0.2,
 	})
 	if err != nil {
-		return Message{}, err
+		return Message{}, Usage{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return Message{}, err
+		return Message{}, Usage{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	req.Header.Set("Accept", "text/event-stream")
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return Message{}, err
+		return Message{}, Usage{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(resp.Body)
-		return Message{}, fmt.Errorf("llm http %d: %s", resp.StatusCode, truncate(string(raw), 240))
+		return Message{}, Usage{}, fmt.Errorf("llm http %d: %s", resp.StatusCode, truncate(string(raw), 240))
 	}
 
 	out := Message{Role: RoleAssistant}
+	var usage Usage
 	calls := map[int]*ToolCall{}
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -192,6 +222,9 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 		var chunk streamChunk
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 			continue
+		}
+		if !chunk.Usage.IsZero() {
+			usage = chunk.Usage
 		}
 		if len(chunk.Choices) == 0 {
 			continue
@@ -221,7 +254,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return out, err
+		return out, usage, err
 	}
 	if len(calls) > 0 {
 		out.ToolCalls = make([]ToolCall, 0, len(calls))
@@ -231,10 +264,11 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 			}
 		}
 	}
-	return out, nil
+	return out, usage, nil
 }
 
 type streamChunk struct {
+	Usage Usage `json:"usage"`
 	Choices []struct {
 		Delta struct {
 			Content   string `json:"content"`

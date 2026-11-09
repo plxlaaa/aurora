@@ -21,10 +21,12 @@ Never print secrets. Never run destructive shell commands unless the user asked.
 On Windows prefer PowerShell syntax.`
 
 type Event struct {
-	Kind string
-	Name string
-	Text string
-	OK   bool
+	Kind  string
+	Name  string
+	Text  string
+	OK    bool
+	Diff  string
+	Usage llm.Usage
 }
 
 type Runner struct {
@@ -33,6 +35,8 @@ type Runner struct {
 	Max    int
 	On     func(Event)
 	msgs   []llm.Message
+	usage  llm.Usage
+	last   llm.Usage
 }
 
 func New(cfg config.Config, workspace string, confirm func(string) bool) (*Runner, error) {
@@ -95,6 +99,18 @@ func (r *Runner) Turns() int {
 	return n
 }
 
+func (r *Runner) Messages() int {
+	return len(r.msgs)
+}
+
+func (r *Runner) SessionUsage() llm.Usage {
+	return r.usage
+}
+
+func (r *Runner) LastUsage() llm.Usage {
+	return r.last
+}
+
 func projectMemory(root string) string {
 	for _, name := range []string{"AURORA.md", "AGENTS.md"} {
 		raw, err := os.ReadFile(filepath.Join(root, name))
@@ -113,9 +129,9 @@ func projectMemory(root string) string {
 	return ""
 }
 
-func (r *Runner) Run(ctx context.Context, user string) (string, error) {
+func (r *Runner) Run(ctx context.Context, user string) (string, llm.Usage, error) {
 	if strings.TrimSpace(user) == "" {
-		return "", fmt.Errorf("empty prompt")
+		return "", llm.Usage{}, fmt.Errorf("empty prompt")
 	}
 	if len(r.msgs) == 0 {
 		r.Reset()
@@ -123,26 +139,41 @@ func (r *Runner) Run(ctx context.Context, user string) (string, error) {
 	r.msgs = append(r.msgs, llm.Message{Role: llm.RoleUser, Content: user})
 	specs := tools.Specs()
 	final := ""
+	turnUsage := llm.Usage{}
 	steps := r.Max
 	if steps <= 0 {
 		steps = 16
 	}
+	defer func() {
+		if r.On != nil {
+			r.On(Event{Kind: "turn_end", Usage: turnUsage})
+		}
+	}()
 	for i := 0; i < steps; i++ {
-		msg, err := r.Client.ChatStream(ctx, r.msgs, specs, func(delta string) {
+		if r.On != nil {
+			r.On(Event{Kind: "step", Text: fmt.Sprintf("%d/%d", i+1, steps)})
+		}
+		msg, stepUsage, err := r.Client.ChatStream(ctx, r.msgs, specs, func(delta string) {
 			if r.On != nil {
 				r.On(Event{Kind: "delta", Text: delta})
 			}
 		})
 		if err != nil && msg.Content == "" && len(msg.ToolCalls) == 0 {
-			msg, err = r.Client.Chat(ctx, r.msgs, specs)
+			msg, stepUsage, err = r.Client.Chat(ctx, r.msgs, specs)
 			if err != nil {
-				return final, err
+				return final, turnUsage, err
 			}
 			if r.On != nil && msg.Content != "" {
 				r.On(Event{Kind: "delta", Text: msg.Content})
 			}
 		} else if err != nil {
-			return final, err
+			return final, turnUsage, err
+		}
+		r.usage = r.usage.Add(stepUsage)
+		r.last = stepUsage
+		turnUsage = turnUsage.Add(stepUsage)
+		if r.On != nil && !stepUsage.IsZero() {
+			r.On(Event{Kind: "usage", Usage: stepUsage})
 		}
 		if msg.Role == "" {
 			msg.Role = llm.RoleAssistant
@@ -156,7 +187,7 @@ func (r *Runner) Run(ctx context.Context, user string) (string, error) {
 			if len(r.msgs) > 48 {
 				r.Compact()
 			}
-			return final, nil
+			return final, turnUsage, nil
 		}
 		for _, call := range msg.ToolCalls {
 			if r.On != nil {
@@ -171,9 +202,9 @@ func (r *Runner) Run(ctx context.Context, user string) (string, error) {
 				Content:    string(payload),
 			})
 			if r.On != nil {
-				r.On(Event{Kind: "tool_result", Name: call.Function.Name, Text: res.Content, OK: res.OK})
+				r.On(Event{Kind: "tool_result", Name: call.Function.Name, Text: res.Content, OK: res.OK, Diff: res.Diff})
 			}
 		}
 	}
-	return final, fmt.Errorf("reached max agent steps (%d)", steps)
+	return final, turnUsage, fmt.Errorf("reached max agent steps (%d)", steps)
 }
