@@ -28,17 +28,28 @@ var toolPrimaryArg = map[string]string{
 
 const cardMaxLines = 40
 
-func toolCard(name, argsJSON string) string {
+// toolCard renders one tool call line. The dot color reflects state:
+// cyan while running, green on success, red on failure.
+func toolCard(name, argsJSON, dotColor string) string {
 	display := toolDisplay[name]
 	if display == "" {
 		display = name
 	}
-	dot := cCyan + "⏺" + cReset
+	dot := dotColor + "⏺" + cReset
 	arg := primaryArg(name, argsJSON)
 	if arg == "" {
 		return dot + " " + cBold + display + cReset
 	}
-	return dot + " " + cBold + display + cReset + "(" + arg + ")"
+	return truncatePlain(dot+" "+cBold+display+cReset+"("+arg+")")
+}
+
+func truncatePlain(s string) string {
+	max := termWidth() - 2
+	r := []rune(s)
+	if len(r) <= max || max < 4 {
+		return s
+	}
+	return string(r[:max-1]) + "…"
 }
 
 func primaryArg(name, argsJSON string) string {
@@ -55,7 +66,10 @@ func primaryArg(name, argsJSON string) string {
 }
 
 func toolResultLine(evOK bool, content string) string {
-	mark := cDim + "⎿" + cReset
+	mark := cRed + "⎿" + cReset
+	if evOK {
+		mark = cGreen + "⎿" + cReset
+	}
 	if evOK {
 		return mark + " " + cDim + resultSummary(content) + cReset
 	}

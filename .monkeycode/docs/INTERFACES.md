@@ -35,7 +35,8 @@
     "provider": "openai",
     "base_url": "https://api.openai.com/v1",
     "model": "gpt-4o-mini",
-    "api_key_env": "AURORA_API_KEY"
+    "api_key_env": "AURORA_API_KEY",
+    "context_window": 128000
   },
   "update": {
     "enabled": true,
@@ -51,6 +52,8 @@
   }
 }
 ```
+
+`llm.context_window` 用于回合末尾的上下文水位预警（≥60% 黄色、≥80% 红色），默认 128000。
 
 ## Agent 工具
 
@@ -68,7 +71,7 @@
 
 REPL 会话在 `/reset` 之前保留对话记忆。`/yolo` 跳过 shell 确认。Windows 更新若锁住 `aurora.exe`，下次启动会从 `aurora.exe.new` 完成替换。
 
-## 内部接口（v0.2）
+## 内部接口（v0.2/v0.3）
 
 ### agent
 
@@ -111,10 +114,14 @@ tools.Diff(old, new string) string  // 行级 LCS diff，±行 + 2 行上下文�
 | 文件 | 职责 |
 |------|------|
 | `output.go` | printer：全局输出互斥 + ClearLine |
-| `spinner.go` | braille spinner：动词池轮换 + 计时 + Ctrl+C 提示，仅 TTY |
+| `spinner.go` | spinner：`· ✢ ✳ ∗ ✻ ✽` 正反回放 + 动词池轮换 + 计时 + Ctrl+C 提示，仅 TTY |
 | `markdown.go` | 行缓冲 markdown-lite：标题/加粗/行内代码/列表/围栏 |
-| `cards.go` | 工具卡片 `⏺ Tool(arg)`、结果行 `⎿`、diff 着色（40 行截断） |
-| `repl.go` | REPL、事件接线、`/usage`、Ctrl+C 语义（回合中取消，空闲退出） |
+| `cards.go` | 工具卡片 `⏺ Tool(arg)`（成功绿/失败红/执行中青）、结果行 `⎿`、diff 着色（40 行截断） |
+| `banner.go` | 圆角欢迎框（模型/provider/git 分支/工作区 + 轮换提示），管道降级纯文本 |
+| `term_unix.go` `term_windows.go` | 终端宽度探测，失败回退 80 |
+| `repl.go` | REPL、事件接线（工具卡片单行重绘）、回合汇总行（tokens/耗时/上下文水位）、Ctrl+C 语义 |
+
+回合事件流（v0.3）：`tool` 事件先打青色卡片并暂存参数，`tool_result` 到达后光标上移擦行重绘着色卡片，再打 `⎿` 结果行与 diff；回合成功结束打汇总行 `↑prompt ↓completion tokens · elapsed · context NN% used`。
 
 ## 更新 Manifest
 

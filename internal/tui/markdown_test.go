@@ -75,16 +75,19 @@ func TestLineBufferFeeds(t *testing.T) {
 }
 
 func TestToolCard(t *testing.T) {
-	card := toolCard("read_file", `{"path":"src/a.go","offset":3}`)
+	card := toolCard("read_file", `{"path":"src/a.go","offset":3}`, cCyan)
 	if !strings.Contains(card, "Read") || !strings.Contains(card, "(src/a.go)") {
 		t.Fatalf("card=%q", card)
 	}
 	if strings.Contains(card, "offset") {
 		t.Fatalf("card should show primary arg only: %q", card)
 	}
-	card = toolCard("run_shell", `{"command":"go test ./..."}`)
+	card = toolCard("run_shell", `{"command":"go test ./..."}`, cGreen)
 	if !strings.Contains(card, "Bash") || !strings.Contains(card, "(go test ./...)") {
 		t.Fatalf("card=%q", card)
+	}
+	if !strings.Contains(card, cGreen+"⏺") {
+		t.Fatalf("dot color missing: %q", card)
 	}
 }
 

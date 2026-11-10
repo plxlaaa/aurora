@@ -45,6 +45,11 @@ Aurora 是一个 Windows 优先的终端 AI 编程助手（CLI Agent），目标
 - **目的**: 对齐 Codex/Claude Code 的终端体验
 - **描述**: spinner 动词轮换 + Ctrl+C 取消回合；工具卡片与彩色 diff；markdown-lite 渲染；token 用量追踪（`/usage`、`/status`）；全部零依赖实现
 
+### 终端视觉打磨（v0.3.0）
+
+- **目的**: 复刻 Claude Code 的视觉节奏
+- **描述**: 圆角欢迎框（含 git 分支）、`⏺` 圆点三态流转（青→绿/红）单行重绘、`⎿` 结果标、Claude Code spinner 帧序正反回放、回合汇总行（tokens/耗时/上下文水位 60%/80% 预警）、`/status` 上下文占比、终端宽度自适应
+
 ## 文档导航
 
 - 当前工作区 `/ .monkeycode/docs/ARCHITECTURE.md` - 架构设计

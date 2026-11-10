@@ -87,7 +87,7 @@ aurora doctor          install / PATH / channel diagnostics
 aurora version
 ```
 
-REPL extras: `/help` `/status` `/usage` `/model` `/cd` `/reset` `/compact` `/yolo` `/update` `/quit`
+REPL extras: `/help` `/status` `/usage` `/model` `/cd` `/reset` `/compact` `/yolo` `/update` `/config` `/quit`
 
 Conversation memory is kept across turns until `/reset`. `aurora config set model <name>` writes `%APPDATA%\aurora\config.json`.
 
@@ -95,13 +95,16 @@ Conversation memory is kept across turns until `/reset`. `aurora config set mode
 
 The REPL renders like modern coding agents:
 
-- Spinner with rotating verbs and elapsed seconds while the model thinks, `Ctrl+C` cancels the running turn (press again when idle to exit)
-- Tool cards: one line per call, e.g. `⏺ Write(src/demo.txt)` with a compact result line
+- Rounded welcome banner with model, provider, git branch, workspace and a rotating tip
+- Spinner with Claude-Code-style frames (`· ✢ ✳ ∗ ✻ ✽`, forward + reverse), rotating verbs and elapsed seconds; `Ctrl+C` cancels the running turn (press again when idle to exit)
+- Tool cards: `⏺ Write(src/demo.txt)` — the dot turns green on success, red on failure; the card line is redrawn in place once the result arrives
+- Result marks: `⎿` green for success, red for errors
 - File edits show colored diffs (`-` red / `+` green), capped long diffs
 - Assistant replies render markdown-lite: headings, bold, inline code, bullets, fenced code blocks
-- `/usage` shows prompt/completion/total tokens for the session and the last step; `/status` includes session totals
+- Turn summary line: `↑prompt ↓completion tokens · elapsed · context NN% used` (yellow at ≥60% of the context window, red at ≥80%)
+- `/status` shows model, git branch, session tokens and context usage; `/model` with no argument prints the current model; `/usage` shows per-step token detail
 
-Usage reporting uses `stream_options.include_usage` on every streaming request; endpoints without usage support show `n/a`.
+Usage reporting uses `stream_options.include_usage` on every streaming request; endpoints without usage support show `n/a`. Set `llm.context_window` (tokens) to calibrate the watermark, default 128000.
 
 ## Build
 

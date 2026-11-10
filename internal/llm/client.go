@@ -230,7 +230,8 @@ func (c *Client) ChatStream(ctx context.Context, messages []Message, tools []Too
 			continue
 		}
 		delta := chunk.Choices[0].Delta
-		if delta.Content != "" {
+		// defensive: ignore content from non-assistant deltas (e.g. role:"tool")
+		if delta.Content != "" && (delta.Role == "" || delta.Role == "assistant") {
 			out.Content += delta.Content
 			if onDelta != nil {
 				onDelta(delta.Content)
@@ -271,6 +272,7 @@ type streamChunk struct {
 	Usage Usage `json:"usage"`
 	Choices []struct {
 		Delta struct {
+			Role      string `json:"role"`
 			Content   string `json:"content"`
 			ToolCalls []struct {
 				Index    int    `json:"index"`

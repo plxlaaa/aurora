@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+var spinnerFrames = []string{"·", "✢", "✳", "∗", "✻", "✽"}
 
 var spinnerVerbs = []string{
 	"Thinking", "Analyzing", "Reasoning", "Planning", "Pondering",
@@ -54,7 +54,9 @@ func (s *spinner) Start() {
 func (s *spinner) loop() {
 	defer close(s.done)
 	start := time.Now()
-	frame := 0
+	pos := 0
+	dir := 1
+	ticks := 0
 	verb := spinnerVerbs[rand.Intn(len(spinnerVerbs))]
 	ticker := time.NewTicker(spinnerTick)
 	defer ticker.Stop()
@@ -63,13 +65,20 @@ func (s *spinner) loop() {
 		case <-s.stop:
 			return
 		case <-ticker.C:
-			frame++
-			if frame%spinnerRerollAt == 0 {
+			ticks++
+			next := pos + dir
+			if next >= len(spinnerFrames) || next < 0 {
+				dir = -dir
+				next = pos + dir
+			}
+			pos = next
+			frame := spinnerFrames[pos]
+			if ticks%spinnerRerollAt == 0 {
 				verb = spinnerVerbs[rand.Intn(len(spinnerVerbs))]
 			}
 			elapsed := int(time.Since(start).Seconds())
 			s.p.Printf("\r\033[2K%s%s%s %s%s%s... %ds %s· Ctrl+C interrupt%s",
-				cCyan, spinnerFrames[frame%len(spinnerFrames)], cReset,
+				cCyan, frame, cReset,
 				cBold, verb, cReset,
 				elapsed,
 				cDim, cReset)

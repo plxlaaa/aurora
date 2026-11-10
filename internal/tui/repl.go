@@ -28,31 +28,26 @@ const (
 	cBold   = "\033[1m"
 )
 
-func Banner(cfg config.Config, workspace string) {
-	fmt.Printf("%s%sAurora%s %s  terminal coding agent\n", cBold, cCyan, cReset, version.Short())
-	fmt.Printf("%smodel%s %s  %sprovider%s %s\n", cDim, cReset, cfg.LLM.Model, cDim, cReset, cfg.LLM.Provider)
-	fmt.Printf("%sworkspace%s %s\n", cDim, cReset, workspace)
-	fmt.Printf("%stype a task, /help for commands, Ctrl+C to exit%s\n\n", cDim, cReset)
+var replCommands = []struct{ name, desc string }{
+	{"/help", "show this help"},
+	{"/status", "session, model, workspace, tokens"},
+	{"/usage", "token usage for session and last step"},
+	{"/model <name>", "switch model for this session"},
+	{"/cd <path>", "change workspace and reset session"},
+	{"/reset", "clear conversation memory"},
+	{"/compact", "keep recent turns only"},
+	{"/yolo", "skip shell confirmation this session"},
+	{"/update", "check and apply local update"},
+	{"/config", "print config path"},
+	{"/quit", "exit"},
 }
 
-func Help() {
-	fmt.Print(`
-commands
-  /help              show this help
-  /status            session, model, workspace, tokens
-  /usage             token usage for session and last step
-  /model <name>      switch model for this session
-  /cd <path>         change workspace and reset session
-  /reset             clear conversation memory
-  /compact           keep recent turns only
-  /yolo              skip shell confirmation this session
-  /update            check and apply local update
-  /config            print config path
-  /quit              exit
-
-plain text is sent to the agent. conversation memory is kept until /reset.
-
-`)
+func (s *Session) Help() {
+	s.out.Printf("\n%scommands%s\n", cBold, cReset)
+	for _, c := range replCommands {
+		s.out.Printf("  %s%-16s%s %s%s%s\n", cBold, c.name, cReset, cDim, c.desc, cReset)
+	}
+	s.out.Printf("\n%splain text is sent to the agent. conversation memory is kept until /reset.%s\n\n", cDim, cReset)
 }
 
 func Confirm(in *bufio.Reader, command string) bool {
@@ -72,6 +67,9 @@ type Session struct {
 	out       *printer
 	spin      *spinner
 	buf       *lineBuffer
+	pendName  string
+	pendArgs  string
+	turnStart time.Time
 }
 
 func newSession(cfg config.Config, workspace string, reader *bufio.Reader) *Session {
@@ -93,7 +91,7 @@ func (s *Session) rebuild() error {
 		if s.Yolo {
 			return true
 		}
-		return Confirm(s.Reader, cmd)
+		return s.confirmShell(cmd)
 	})
 	if err != nil {
 		return err
@@ -103,6 +101,14 @@ func (s *Session) rebuild() error {
 	return nil
 }
 
+func (s *Session) confirmShell(cmd string) bool {
+	s.pendName = ""
+	s.out.Printf("%srun shell?%s %s\n[y/N] ", cYellow, cReset, cmd)
+	line, _ := s.Reader.ReadString('\n')
+	line = strings.TrimSpace(strings.ToLower(line))
+	return line == "y" || line == "yes"
+}
+
 func (s *Session) attach() {
 	s.Runner.On = func(ev agent.Event) {
 		switch ev.Kind {
@@ -110,26 +116,37 @@ func (s *Session) attach() {
 			s.spin.Start()
 		case "delta":
 			s.spin.Stop()
+			s.pendName = ""
 			s.buf.Feed(ev.Text, s.out)
 		case "tool":
 			s.spin.Stop()
 			if s.rich {
-				s.out.Printf("\n%s\n", toolCard(ev.Name, ev.Text))
+				s.pendName = ev.Name
+				s.pendArgs = ev.Text
+				s.out.Printf("\n%s\n", toolCard(ev.Name, ev.Text, cCyan))
 			} else {
 				s.out.Printf("\n%s▸ %s%s %s\n", cYellow, ev.Name, cReset, cDim+trim(ev.Text, 120)+cReset)
 			}
 		case "tool_result":
-			if s.rich {
-				s.out.Printf("%s\n", toolResultLine(ev.OK, ev.Text))
-				if ev.Diff != "" {
-					s.out.Printf("%s\n", renderDiff(ev.Diff))
-				}
-			} else {
+			if !s.rich {
 				color := cGreen
 				if !ev.OK {
 					color = cRed
 				}
 				s.out.Printf("%s%s%s\n", color, trim(ev.Text, 400), cReset)
+				return
+			}
+			dot := cGreen
+			if !ev.OK {
+				dot = cRed
+			}
+			if s.pendName != "" {
+				s.out.Printf("\033[1A\033[2K%s\n", toolCard(s.pendName, s.pendArgs, dot))
+				s.pendName = ""
+			}
+			s.out.Printf("%s\n", toolResultLine(ev.OK, ev.Text))
+			if ev.Diff != "" {
+				s.out.Printf("%s\n", renderDiff(ev.Diff))
 			}
 		case "done":
 			s.buf.Flush(s.out)
@@ -138,12 +155,15 @@ func (s *Session) attach() {
 			}
 		case "turn_end":
 			s.spin.Stop()
+			s.pendName = ""
 		}
 	}
 }
 
 func (s *Session) runTurn(ctx context.Context, line string) {
 	s.buf.Reset()
+	s.pendName = ""
+	s.turnStart = time.Now()
 	turnCtx, stop := signal.NotifyContext(ctx, os.Interrupt)
 	defer stop()
 	_, _, err := s.Runner.Run(turnCtx, line)
@@ -154,8 +174,38 @@ func (s *Session) runTurn(ctx context.Context, line string) {
 		} else {
 			s.out.Printf("%serror:%s %v\n", cRed, cReset, err)
 		}
+		s.out.Print("\n")
+		return
 	}
+	s.printTurnSummary()
 	s.out.Print("\n")
+}
+
+func (s *Session) printTurnSummary() {
+	u := s.Runner.LastUsage()
+	elapsed := time.Since(s.turnStart).Seconds()
+	parts := []string{
+		"↑" + fmtTokens(u.Prompt) + " ↓" + fmtTokens(u.Completion) + " tokens",
+		fmt.Sprintf("%.1fs", elapsed),
+	}
+	if seg := contextSegment(u.Prompt, s.Cfg.LLM.ContextWindow); seg != "" {
+		parts = append(parts, seg)
+	}
+	s.out.Printf("  %s%s%s\n", cDim, strings.Join(parts, " · "), cReset)
+}
+
+func contextSegment(prompt, window int64) string {
+	if window <= 0 || prompt <= 0 {
+		return ""
+	}
+	pct := int(float64(prompt) * 100 / float64(window))
+	if pct >= 80 {
+		return cRed + fmt.Sprintf("context %d%% used, /compact", pct) + cReset
+	}
+	if pct >= 60 {
+		return cYellow + fmt.Sprintf("context %d%% used, /compact", pct) + cReset
+	}
+	return ""
 }
 
 func fmtTokens(n int64) string {
@@ -182,7 +232,7 @@ func RunREPL(ctx context.Context, cfg config.Config, workspace string, in io.Rea
 	if err := s.rebuild(); err != nil {
 		return err
 	}
-	Banner(cfg, workspace)
+	Banner(s.out, cfg, workspace)
 	hintUpdate(cfg)
 
 	for {
@@ -201,7 +251,7 @@ func RunREPL(ctx context.Context, cfg config.Config, workspace string, in io.Rea
 		}
 		switch {
 		case line == "/help":
-			Help()
+			s.Help()
 		case line == "/quit" || line == "/exit":
 			return nil
 		case line == "/config":
@@ -209,9 +259,14 @@ func RunREPL(ctx context.Context, cfg config.Config, workspace string, in io.Rea
 			fmt.Println(p)
 		case line == "/status":
 			u := s.Runner.SessionUsage()
-			s.out.Printf("version %s\nmodel %s\nworkspace %s\nyolo %v\nturns %d  messages %d\ntokens session %s\n",
-				version.Short(), s.Cfg.LLM.Model, s.Workspace, s.Yolo,
-				s.Runner.Turns(), s.Runner.Messages(), fmtTokens(u.Total))
+			last := s.Runner.LastUsage()
+			ctxLine := "n/a"
+			if cw := s.Cfg.LLM.ContextWindow; cw > 0 && last.Prompt > 0 {
+				ctxLine = fmt.Sprintf("%d%% of %s", int(float64(last.Prompt)*100/float64(cw)), fmtTokens(cw))
+			}
+			s.out.Printf("version %s\nmodel %s\nworkspace %s\ngit %s\nyolo %v\nturns %d  messages %d\ntokens session %s\ncontext %s\n",
+				version.Short(), s.Cfg.LLM.Model, s.Workspace, gitBranch(s.Workspace), s.Yolo,
+				s.Runner.Turns(), s.Runner.Messages(), fmtTokens(u.Total), ctxLine)
 		case line == "/usage":
 			u := s.Runner.SessionUsage()
 			last := s.Runner.LastUsage()
@@ -237,6 +292,8 @@ func RunREPL(ctx context.Context, cfg config.Config, workspace string, in io.Rea
 			if err := updateFn(); err != nil {
 				fmt.Printf("%supdate failed:%s %v\n", cRed, cReset, err)
 			}
+		case line == "/model":
+			fmt.Println("model =", s.Cfg.LLM.Model)
 		case strings.HasPrefix(line, "/model "):
 			s.Cfg.LLM.Model = strings.TrimSpace(strings.TrimPrefix(line, "/model "))
 			s.Runner.SetModel(s.Cfg.LLM.Model)

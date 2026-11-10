@@ -18,10 +18,11 @@ type Config struct {
 }
 
 type LLMConfig struct {
-	Provider  string `json:"provider"`
-	BaseURL   string `json:"base_url"`
-	Model     string `json:"model"`
-	APIKeyEnv string `json:"api_key_env"`
+	Provider      string `json:"provider"`
+	BaseURL       string `json:"base_url"`
+	Model         string `json:"model"`
+	APIKeyEnv     string `json:"api_key_env"`
+	ContextWindow int64  `json:"context_window"`
 }
 
 type UpdateConfig struct {
@@ -43,10 +44,11 @@ type AgentConfig struct {
 func Default() Config {
 	return Config{
 		LLM: LLMConfig{
-			Provider:  "openai",
-			BaseURL:   "https://api.openai.com/v1",
-			Model:     "gpt-4o-mini",
-			APIKeyEnv: "AURORA_API_KEY",
+			Provider:      "openai",
+			BaseURL:       "https://api.openai.com/v1",
+			Model:         "gpt-4o-mini",
+			APIKeyEnv:     "AURORA_API_KEY",
+			ContextWindow: 128000,
 		},
 		Update: UpdateConfig{
 			Enabled:      true,
@@ -286,6 +288,21 @@ func SetField(cfg *Config, key, value string) error {
 		cfg.LLM.Provider = value
 	case "llm.api_key_env", "api_key_env":
 		cfg.LLM.APIKeyEnv = value
+	case "llm.context_window", "context_window":
+		if strings.HasPrefix(value, "-") {
+			return fmt.Errorf("context_window must be a positive integer")
+		}
+		n := int64(0)
+		for _, ch := range value {
+			if ch < '0' || ch > '9' {
+				return fmt.Errorf("context_window must be a positive integer")
+			}
+			n = n*10 + int64(ch-'0')
+		}
+		if n <= 0 {
+			return fmt.Errorf("context_window must be a positive integer")
+		}
+		cfg.LLM.ContextWindow = n
 	case "agent.max_steps", "max_steps":
 		n := 0
 		for _, ch := range value {
