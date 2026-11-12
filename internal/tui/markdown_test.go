@@ -96,6 +96,9 @@ func TestToolResultLine(t *testing.T) {
 	if !strings.Contains(out, "3 lines") {
 		t.Fatalf("ok=%q", out)
 	}
+	if !strings.HasPrefix(out, "  \x1b[32m\u23bf") && !strings.Contains(out[:6], "\u23bf") {
+		t.Fatalf("result line must be nested child: %q", out)
+	}
 	out = toolResultLine(false, "boom: bad thing")
 	if !strings.Contains(out, "boom") {
 		t.Fatalf("fail=%q", out)

@@ -111,9 +111,11 @@ func primaryArg(name, argsJSON string) string {
 }
 
 func toolResultLine(evOK bool, content string) string {
-        mark := cRed + "⎿" + cReset
+        // two-space indent forms the Claude-Code tree: ⏺ call on the
+        // parent line, ⎿ result nested as its child
+        mark := "  " + cRed + "⎿" + cReset
         if evOK {
-                mark = cGreen + "⎿" + cReset
+                mark = "  " + cGreen + "⎿" + cReset
         }
         if evOK {
                 return mark + " " + cDim + resultSummary(content) + cReset

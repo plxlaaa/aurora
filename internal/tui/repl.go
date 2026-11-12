@@ -180,6 +180,7 @@ func (s *Session) attach() {
                         if ev.Diff != "" {
                                 s.out.Printf("%s\n", renderDiff(ev.Diff))
                         }
+                        s.out.Print("\n") // blank line closes the tool block
                 case "done":
                         s.buf.Flush(s.out)
                         if ev.Text != "" && !strings.HasSuffix(ev.Text, "\n") {
@@ -229,24 +230,27 @@ func (s *Session) runTurn(ctx context.Context, line string) {
                 return
         }
         s.printTurnSummary()
-        s.out.Printf("%s\n", StatusLine(s.Runner.Model(), s.Workspace, s.Runner.LastUsage(), s.Cfg.LLM.ContextWindow))
         s.out.Print("\n")
         if err := agent.SaveSession(s.Cfg, s.Workspace, s.Runner); err != nil && verboseSave {
                 s.out.Printf("%ssession autosave failed: %v%s\n", cDim, err, cReset)
         }
 }
 
+// printTurnSummary closes a finished turn with the Claude-Code-style tree
+// footer. One dim line under the answer: ⎿ tokens · elapsed · context headroom.
+// Model/workspace live in the banner and /status — no need to repeat here.
 func (s *Session) printTurnSummary() {
         u := s.Runner.LastUsage()
         elapsed := time.Since(s.turnStart).Seconds()
         parts := []string{
-                "↑" + fmtTokens(u.Prompt) + " ↓" + fmtTokens(u.Completion) + " tokens",
+                fmt.Sprintf("↑%s ↓%s", fmtTokens(u.Prompt), fmtTokens(u.Completion)),
                 fmt.Sprintf("%.1fs", elapsed),
         }
-        if seg := contextSegment(u.Prompt, s.Cfg.LLM.ContextWindow); seg != "" {
-                parts = append(parts, seg)
+        if cw := s.Cfg.LLM.ContextWindow; cw > 0 && u.Prompt > 0 {
+                pct := int(float64(u.Prompt) * 100 / float64(cw))
+                parts = append(parts, fmt.Sprintf("ctx %d%%", pct))
         }
-        s.out.Printf("  %s%s%s\n", cDim, strings.Join(parts, " · "), cReset)
+        s.out.Printf("\n%s⎿%s %s%s%s\n", cDim, cReset, cDim, strings.Join(parts, " · "), cReset)
 }
 
 func contextSegment(prompt, window int64) string {
