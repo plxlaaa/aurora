@@ -80,7 +80,7 @@ func toolCard(name, argsJSON, dotColor string) string {
         if display == "" {
                 display = name
         }
-        dot := dotColor + "⏺" + cReset
+        dot := dotColor + glyphToolDot() + cReset
         arg := primaryArg(name, argsJSON)
         if arg == "" {
                 return dot + " " + cBold + display + cReset
@@ -113,9 +113,9 @@ func primaryArg(name, argsJSON string) string {
 func toolResultLine(evOK bool, content string) string {
         // two-space indent forms the Claude-Code tree: ⏺ call on the
         // parent line, ⎿ result nested as its child
-        mark := "  " + cRed + "⎿" + cReset
+        mark := "  " + cRed + glyphToolBranch() + cReset
         if evOK {
-                mark = "  " + cGreen + "⎿" + cReset
+                mark = "  " + cGreen + glyphToolBranch() + cReset
         }
         if evOK {
                 return mark + " " + cDim + resultSummary(content) + cReset

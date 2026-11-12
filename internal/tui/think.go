@@ -114,7 +114,7 @@ func holdbackLen(s string) int {
 
 // thinkNotice is the one-line collapsed summary after a reasoning block ends.
 func thinkNotice(seconds float64) string {
-        return cDim + "  ✻ thought for " + fmtSeconds(seconds) + cReset + "\n"
+        return cDim + "  " + glyphThink() + " thought for " + fmtSeconds(seconds) + cReset + "\n"
 }
 
 func fmtSeconds(s float64) string {

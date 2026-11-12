@@ -207,7 +207,11 @@ func (s *Session) showPlan(resultJSON string) {
         if len(steps) == 0 {
                 steps = tools.CurrentPlan()
         }
-        s.out.Printf("%s\n", tools.RenderPlan(steps))
+        if glyphUnicode {
+                s.out.Printf("%s\n", tools.RenderPlan(steps))
+        } else {
+                s.out.Printf("%s\n", tools.RenderPlanASCII(steps))
+        }
 }
 
 func (s *Session) runTurn(ctx context.Context, line string) {
@@ -250,7 +254,7 @@ func (s *Session) printTurnSummary() {
                 pct := int(float64(u.Prompt) * 100 / float64(cw))
                 parts = append(parts, fmt.Sprintf("ctx %d%%", pct))
         }
-        s.out.Printf("\n%s⎿%s %s%s%s\n", cDim, cReset, cDim, strings.Join(parts, " · "), cReset)
+        s.out.Printf("\n%s%s%s %s%s%s\n", cDim, glyphTurnBranch(), cReset, cDim, strings.Join(parts, " · "), cReset)
 }
 
 func contextSegment(prompt, window int64) string {

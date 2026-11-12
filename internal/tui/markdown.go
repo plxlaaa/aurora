@@ -36,10 +36,10 @@ func renderMarkdownLine(line string, st *mdState) string {
                 return cBold + text + cReset
         }
         if m := bulletRe.FindStringSubmatch(line); m != nil {
-                return cDim + "•" + cReset + " " + inlineMarkdown(m[1])
+                return cDim + glyphBullet() + cReset + " " + inlineMarkdown(m[1])
         }
         if m := quoteRe.FindStringSubmatch(line); m != nil {
-                return cDim + "▏" + cReset + " " + cDim + inlineMarkdown(m[1]) + cReset
+                return cDim + glyphQuote() + cReset + " " + cDim + inlineMarkdown(m[1]) + cReset
         }
         if hrRe.MatchString(line) {
                 return cDim + strings.Repeat("─", 32) + cReset
