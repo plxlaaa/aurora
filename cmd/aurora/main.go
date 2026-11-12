@@ -326,6 +326,7 @@ func cmdRun(prompt string) error {
 func cmdREPL(args []string) error {
         wd, _ := os.Getwd()
         resume := tui.ResumeAsk
+        lineMode := false
         var task string
         for _, a := range args {
                 switch a {
@@ -333,6 +334,8 @@ func cmdREPL(args []string) error {
                         resume = tui.ResumeYes
                 case "--no-resume":
                         resume = tui.ResumeNo
+                case "--line":
+                        lineMode = true
                 default:
                         if task == "" {
                                 task = a
@@ -351,6 +354,22 @@ func cmdREPL(args []string) error {
         cfg, err = offerFirstRunSetup(cfg, reader)
         if err != nil {
                 return err
+        }
+        // interactive terminal -> fullscreen TUI (fixed composer + status
+        // bar); pipes and --line stay on the classic scrolling REPL
+        if !lineMode && tui.IsInteractiveTTY() {
+                runner, err := agent.New(cfg, wd, nil)
+                if err != nil {
+                        return err
+                }
+                if resume == tui.ResumeYes {
+                        _, _ = agent.LoadSession(cfg, wd, runner)
+                }
+                if err := tui.RunScreen(runner, wd, version.Short(), cfg.LLM.ContextWindow); err != nil {
+                        return err
+                }
+                _ = agent.SaveSession(cfg, wd, runner)
+                return nil
         }
         return tui.RunREPL(context.Background(), cfg, wd, reader, func() error {
                 return cmdUpdate(nil)
