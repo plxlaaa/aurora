@@ -77,6 +77,14 @@ func (r *Runner) SetModel(model string) {
         }
 }
 
+// SetConfirm swaps the shell confirmation callback at runtime
+// (fullscreen /yolo toggle).
+func (r *Runner) SetConfirm(fn func(string) bool) {
+        if r.Tools != nil {
+                r.Tools.Confirm = fn
+        }
+}
+
 func (r *Runner) Compact() {
         if len(r.msgs) <= 1 {
                 return

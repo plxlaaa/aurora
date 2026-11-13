@@ -31,6 +31,7 @@ type viewMsg struct {
         text string
         name string
         ok   bool
+        done bool // tool card has received its result
 }
 
 // tea messages
@@ -49,6 +50,7 @@ type screenModel struct {
         turnAt   time.Time
         dur      time.Duration
         scroll   int // manual scroll offset from bottom (0 = follow)
+        lastLn   int // transcript line count of the last render (scroll clamp)
         width    int
         height   int
         errText  string
@@ -134,7 +136,9 @@ func (m *screenModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
                 }
                 return m, m.send()
         case tea.KeyPgUp:
-                if m.scroll < len(m.msgs) {
+                // clamp against the last rendered line count; visibleTail
+                // clamps again so overscroll can never break the frame
+                if m.scroll < m.lastLn {
                         m.scroll++
                 }
                 return m, nil
@@ -142,6 +146,12 @@ func (m *screenModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
                 if m.scroll > 0 {
                         m.scroll--
                 }
+                return m, nil
+        case tea.KeyHome:
+                m.scroll = m.lastLn
+                return m, nil
+        case tea.KeyEnd:
+                m.scroll = 0
                 return m, nil
         case tea.KeyBackspace:
                 if len(m.input) > 0 {
@@ -162,6 +172,7 @@ func (m *screenModel) send() tea.Cmd {
         }
         m.input = m.input[:0]
         m.errText = ""
+        m.dur = 0 // reset last-turn duration for the status bar
         m.think = ThinkFilter{}
 
         // slash commands run locally inside the composer
@@ -203,6 +214,22 @@ func (m *screenModel) handleCommand(text string) {
                 m.msgs = m.msgs[:0]
                 m.runner.Reset()
                 m.msgs = append(m.msgs, viewMsg{kind: msgSystem, text: "session cleared"})
+        case text == "/compact":
+                m.runner.Compact()
+                m.msgs = append(m.msgs, viewMsg{kind: msgSystem, text: "session compacted"})
+        case text == "/yolo":
+                m.runner.SetConfirm(func(string) bool { return true })
+                m.msgs = append(m.msgs, viewMsg{kind: msgSystem, text: "yolo on — shell runs without confirmation"})
+        case text == "/status":
+                m.msgs = append(m.msgs, viewMsg{kind: msgSystem,
+                        text: fmt.Sprintf("model %s · workspace %s · turns %d · v%s",
+                                m.runner.Model(), m.workspace, m.runner.Turns(), m.version)})
+        case strings.HasPrefix(text, "/model "):
+                name := resolveModelAlias(strings.TrimSpace(strings.TrimPrefix(text, "/model ")))
+                m.runner.SetModel(name)
+                m.msgs = append(m.msgs, viewMsg{kind: msgSystem, text: "model = " + name})
+        case text == "/model":
+                m.msgs = append(m.msgs, viewMsg{kind: msgSystem, text: "model = " + m.runner.Model()})
         case text == "/help":
                 var b strings.Builder
                 b.WriteString("commands:\n")
@@ -233,14 +260,20 @@ func (m *screenModel) handleAgentEvent(ev agent.Event) tea.Model {
                         m.msgs = append(m.msgs, viewMsg{kind: msgSystem, text: "plan updated"})
                         return m
                 }
-                if n := len(m.msgs); n > 0 && m.msgs[n-1].kind == msgTool && m.msgs[n-1].name == ev.Name {
-                        m.msgs[n-1] = viewMsg{
-                                kind: msgTool, name: ev.Name, ok: ev.OK,
-                                text: m.msgs[n-1].text + " → " + trim(ev.Text, 60),
+                // find the most recent unfinished card with the same tool name —
+                // interleaved tool calls (read→edit→read) must not leave the
+                // first card stuck in its argument-only state
+                for i := len(m.msgs) - 1; i >= 0; i-- {
+                        vm := m.msgs[i]
+                        if vm.kind == msgTool && vm.name == ev.Name && !vm.done {
+                                vm.ok = ev.OK
+                                vm.done = true
+                                vm.text += " → " + trim(ev.Text, 60)
+                                m.msgs[i] = vm
+                                return m
                         }
-                } else {
-                        m.msgs = append(m.msgs, viewMsg{kind: msgTool, name: ev.Name, ok: ev.OK, text: trim(ev.Text, 60)})
                 }
+                m.msgs = append(m.msgs, viewMsg{kind: msgTool, name: ev.Name, ok: ev.OK, done: true, text: trim(ev.Text, 60)})
         }
         return m
 }
@@ -281,6 +314,7 @@ func renderFrame(m *screenModel) string {
                 pad := make([]string, transcriptH-len(lines))
                 lines = append(pad, lines...)
         }
+        m.lastLn = len(lines) // scroll clamp for PgUp/Home
 
         var b strings.Builder
         b.WriteString(strings.Join(lines, "\n"))
@@ -291,15 +325,58 @@ func renderFrame(m *screenModel) string {
                 fmt.Fprintf(&b, " %s Thinking… %s (Ctrl+C interrupt)\n", glyphThink(), d)
         }
 
+        // composer: border draws +2 columns around its Width() content area,
+        // so Width(w-2) fills the full terminal width edge to edge
         line := string(m.input)
         if line == "" && !m.busy {
                 line = "type a task… (/help · Ctrl+C exit · PgUp scroll)"
         }
-        b.WriteString(screenStyles.inputBorder.Width(w - 4).Render("> " + line))
+        b.WriteString(screenStyles.inputBorder.Width(w - 2).Render("> " + truncateVis(line, w-6)))
         b.WriteString("\n")
 
-        b.WriteString(screenStyles.statusStyle.Render(m.statusLine()))
+        // statusStyle has PaddingLeft(2) on top of the rendered content, so
+        // the truncation budget is w-2 to keep the bar on one physical line
+        b.WriteString(screenStyles.statusStyle.Render(truncateVis(m.statusLine(), w-2)))
         return b.String()
+}
+
+// truncateVis cuts s to at most max display columns, wide-rune aware
+// (CJK counts 2). Keeps composer/status to a single physical line —
+// overflow would push the frame taller and shake the layout.
+func truncateVis(s string, max int) string {
+        if max < 4 {
+                return s
+        }
+        if visWidth(s) <= max {
+                return s
+        }
+        var b strings.Builder
+        w := 0
+        for _, r := range s {
+                rw := runeW(r)
+                if w+rw > max-1 {
+                        break
+                }
+                b.WriteRune(r)
+                w += rw
+        }
+        return b.String() + "…"
+}
+
+func runeW(r rune) int {
+        if r >= 0x1100 && ((r >= 0x2E80 && r <= 0xA4CF) || (r >= 0xAC00 && r <= 0xD7A3) ||
+                (r >= 0xF900 && r <= 0xFAFF) || (r >= 0xFF00 && r <= 0xFF60) || (r >= 0xFFE0 && r <= 0xFFE6)) {
+                return 2
+        }
+        return 1
+}
+
+func visWidth(s string) int {
+        w := 0
+        for _, r := range s {
+                w += runeW(r)
+        }
+        return w
 }
 
 // visibleTail returns the last `h` lines of `lines`, scrolled up by
@@ -362,8 +439,11 @@ func (m *screenModel) modelName() string {
 }
 
 func shortModel(name string) string {
-        if len(name) > 28 {
-                return name[:25] + "…"
+        // rune-safe: byte slicing would cut CJK/model names mid-codepoint
+        // and print mojibake in the status bar
+        rs := []rune(name)
+        if len(rs) > 28 {
+                return string(rs[:25]) + "…"
         }
         return name
 }
